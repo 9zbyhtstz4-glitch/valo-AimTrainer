@@ -14,7 +14,7 @@
 
 AAimTrainerCharacter::AAimTrainerCharacter()
 {
-	// 視点・移動ともイベント/コンポーネント駆動のため、本クラスのTickは不要
+	// 視点・移動・ジャンプともイベント/コンポーネント駆動のため、本クラスのTickは不要
 	PrimaryActorTick.bCanEverTick = false;
 
 	// --- カプセル(当たり判定)の基本サイズ ---
@@ -35,18 +35,29 @@ AAimTrainerCharacter::AAimTrainerCharacter()
 	bUseControllerRotationPitch = false;
 	bUseControllerRotationRoll = false;
 
-	// --- 歩行速度の既定値をエディタ表示と一致させる ---
-	// (Blueprint側で WalkSpeed を編集した場合は BeginPlay で再反映される)
-	GetCharacterMovement()->MaxWalkSpeed = WalkSpeed;
+	// --- 移動/ジャンプの既定値をエディタ表示と一致させる ---
+	// (Blueprint側で編集された場合は BeginPlay で再反映される)
+	UCharacterMovementComponent* Movement = GetCharacterMovement();
+	Movement->MaxWalkSpeed = WalkSpeed;
+	Movement->JumpZVelocity = JumpZVelocity;
+	Movement->GravityScale = GravityScale;
+
+	// 連続ジャンプ(空中での多段ジャンプ)を許可しない。
+	// ※ACharacter の既定値も1だが、仕様として明示しておく。
+	JumpMaxCount = 1;
 }
 
 void AAimTrainerCharacter::BeginPlay()
 {
 	Super::BeginPlay();
 
-	// Blueprintやインスタンスで編集された WalkSpeed を移動コンポーネントへ反映する。
-	// 速度上限・加減速の計算は CharacterMovementComponent の責務(DeltaTimeで積分される)。
-	GetCharacterMovement()->MaxWalkSpeed = WalkSpeed;
+	// Blueprintやインスタンスで編集されたプロパティを移動コンポーネントへ反映する。
+	// ジャンプ・落下の物理計算は CharacterMovementComponent の責務
+	// (初速 JumpZVelocity を与えた後、重力を DeltaTime で積分する)。
+	UCharacterMovementComponent* Movement = GetCharacterMovement();
+	Movement->MaxWalkSpeed = WalkSpeed;
+	Movement->JumpZVelocity = JumpZVelocity;
+	Movement->GravityScale = GravityScale;
 }
 
 void AAimTrainerCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputComponent)
@@ -94,6 +105,21 @@ void AAimTrainerCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInpu
 	{
 		UE_LOG(LogTemp, Warning,
 			TEXT("[AimTrainer] MoveAction が未割り当てです。BP_AimTrainerCharacter で IA_Move を設定してください。"));
+	}
+
+	// ジャンプ: ACharacter 標準関数へ直接バインドする(独自のジャンプ処理は作らない)。
+	//  - Started   = 押した瞬間に1回だけ発火 → Jump()
+	//  - Completed = 離した瞬間に発火       → StopJumping()
+	// Started はホールド中に再発火しないため、押しっぱなしによる連続ジャンプは発生しない。
+	if (JumpAction)
+	{
+		EIC->BindAction(JumpAction, ETriggerEvent::Started, this, &ACharacter::Jump);
+		EIC->BindAction(JumpAction, ETriggerEvent::Completed, this, &ACharacter::StopJumping);
+	}
+	else
+	{
+		UE_LOG(LogTemp, Warning,
+			TEXT("[AimTrainer] JumpAction が未割り当てです。BP_AimTrainerCharacter で IA_Jump を設定してください。"));
 	}
 
 	// 視点操作: マウス移動中は毎フレーム発火する Triggered にバインドする

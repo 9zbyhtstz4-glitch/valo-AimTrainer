@@ -1,8 +1,9 @@
 ﻿// AimTrainerCharacter: エイム練習用のFPSキャラクター
 // 【実装済みの範囲】
 //  - ステップ1: FPS視点カメラ + マウス視点操作(ヨー/ピッチ)
-//  - ステップ2: WASD移動(本ステップ)
-// ジャンプ・しゃがみ・武器は今後のステップで追加する。
+//  - ステップ2: WASD移動
+//  - ステップ3: ジャンプ(本ステップ)
+// しゃがみ・武器は今後のステップで追加する。
 //
 // 入力について:
 //  - UE5標準の運用に合わせ、InputAction / InputMappingContext は
@@ -11,8 +12,9 @@
 //    Blueprint(BP_AimTrainerCharacter)側で割り当てる。
 //
 // 責務分離について:
-//  - 本クラスは「入力を移動の意図(方向×強さ)へ変換する」ところまでを担当し、
-//    実際の移動計算(加速・減速・速度上限・衝突)は CharacterMovementComponent に委譲する。
+//  - 本クラスは「入力を意図へ変換する」ところまでを担当し、
+//    移動・ジャンプの物理計算(加速・重力・速度上限・衝突)は
+//    ACharacter / CharacterMovementComponent の標準機能に委譲する。
 #pragma once
 
 #include "CoreMinimal.h"
@@ -70,6 +72,10 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "AimTrainer|Input")
 	TObjectPtr<UInputAction> MoveAction;
 
+	/** ジャンプアクション(IA_Jump / Digital(bool) を割り当てる。Spaceキー) */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "AimTrainer|Input")
+	TObjectPtr<UInputAction> JumpAction;
+
 	// ==============================
 	// 移動設定
 	// ==============================
@@ -81,6 +87,25 @@ protected:
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "AimTrainer|Move", meta = (ClampMin = "1.0"))
 	float WalkSpeed = 540.f;
+
+	// ==============================
+	// ジャンプ設定
+	// ==============================
+
+	/**
+	 * ジャンプ初速(uu/s)。BeginPlay で CharacterMovementComponent の JumpZVelocity へ反映される。
+	 * 到達高さの目安 ≈ JumpZVelocity^2 / (2 × 980 × GravityScale)。
+	 * 既定430では約94uu(GravityScale=1.0時)の控えめなジャンプになる。
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "AimTrainer|Jump", meta = (ClampMin = "1.0"))
+	float JumpZVelocity = 430.f;
+
+	/**
+	 * 重力倍率。BeginPlay で CharacterMovementComponent の GravityScale へ反映される。
+	 * 大きくするほど落下が速くなり、同じ初速でもジャンプは低くなる。
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "AimTrainer|Jump", meta = (ClampMin = "0.1"))
+	float GravityScale = 1.0f;
 
 	// ==============================
 	// 視点設定
@@ -101,6 +126,8 @@ protected:
 	// ==============================
 	// 入力コールバック
 	// ==============================
+	// ジャンプは ACharacter 標準の Jump / StopJumping へ直接バインドするため
+	// 本クラスに独自のジャンプ関数は持たない(要件: 独自ジャンプ処理を作らない)。
 
 	/** WASD移動。コントローラのヨーのみを基準に前後左右の移動入力を加える */
 	void Input_Move(const FInputActionValue& Value);
