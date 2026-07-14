@@ -6,6 +6,7 @@
 #include "EnhancedInputComponent.h"
 #include "EnhancedInputSubsystems.h"
 #include "Engine/LocalPlayer.h"
+#include "GameFramework/CharacterMovementComponent.h"
 #include "GameFramework/PlayerController.h"
 #include "InputAction.h"
 #include "InputActionValue.h"
@@ -13,7 +14,7 @@
 
 AAimTrainerCharacter::AAimTrainerCharacter()
 {
-	// 視点操作はイベント駆動のため毎フレーム処理は不要
+	// 視点・移動ともイベント/コンポーネント駆動のため、本クラスのTickは不要
 	PrimaryActorTick.bCanEverTick = false;
 
 	// --- カプセル(当たり判定)の基本サイズ ---
@@ -33,6 +34,19 @@ AAimTrainerCharacter::AAimTrainerCharacter()
 	bUseControllerRotationYaw = true;
 	bUseControllerRotationPitch = false;
 	bUseControllerRotationRoll = false;
+
+	// --- 歩行速度の既定値をエディタ表示と一致させる ---
+	// (Blueprint側で WalkSpeed を編集した場合は BeginPlay で再反映される)
+	GetCharacterMovement()->MaxWalkSpeed = WalkSpeed;
+}
+
+void AAimTrainerCharacter::BeginPlay()
+{
+	Super::BeginPlay();
+
+	// Blueprintやインスタンスで編集された WalkSpeed を移動コンポーネントへ反映する。
+	// 速度上限・加減速の計算は CharacterMovementComponent の責務(DeltaTimeで積分される)。
+	GetCharacterMovement()->MaxWalkSpeed = WalkSpeed;
 }
 
 void AAimTrainerCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputComponent)
@@ -69,6 +83,19 @@ void AAimTrainerCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInpu
 		return;
 	}
 
+	// 移動: キーを押している間は毎Tick発火する Triggered にバインドする。
+	// AddMovementInput は「そのTickの移動意図」を渡すだけで移動量を直接加算しないため、
+	// 発火頻度(フレームレート)が変わっても移動速度は変わらない。
+	if (MoveAction)
+	{
+		EIC->BindAction(MoveAction, ETriggerEvent::Triggered, this, &AAimTrainerCharacter::Input_Move);
+	}
+	else
+	{
+		UE_LOG(LogTemp, Warning,
+			TEXT("[AimTrainer] MoveAction が未割り当てです。BP_AimTrainerCharacter で IA_Move を設定してください。"));
+	}
+
 	// 視点操作: マウス移動中は毎フレーム発火する Triggered にバインドする
 	if (LookAction)
 	{
@@ -79,6 +106,29 @@ void AAimTrainerCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInpu
 		UE_LOG(LogTemp, Warning,
 			TEXT("[AimTrainer] LookAction が未割り当てです。BP_AimTrainerCharacter で IA_Look を設定してください。"));
 	}
+}
+
+void AAimTrainerCharacter::Input_Move(const FInputActionValue& Value)
+{
+	if (!Controller)
+	{
+		return;
+	}
+
+	// IA_Move は Axis2D(X=右+, Y=前+)。値の組み立てはIMC側のモディファイアが行う。
+	const FVector2D MoveValue = Value.Get<FVector2D>();
+
+	// 視点のヨーのみを基準に、水平な前方向・右方向を求める。
+	// (ピッチを含めると見上げ中に前進入力が浮き上がる方向へ向くため除外する)
+	const FRotator YawRotation(0.f, Controller->GetControlRotation().Yaw, 0.f);
+	const FVector ForwardDir = FRotationMatrix(YawRotation).GetUnitAxis(EAxis::X);
+	const FVector RightDir = FRotationMatrix(YawRotation).GetUnitAxis(EAxis::Y);
+
+	// 移動の「意図」だけを渡す。実際の加速・速度上限(MaxWalkSpeed)・衝突は
+	// CharacterMovementComponent が DeltaTime を用いて計算するため、
+	// 60fps/144fps以上でも最終的な移動速度は一定になる(フレームレート非依存)。
+	AddMovementInput(ForwardDir, MoveValue.Y);
+	AddMovementInput(RightDir, MoveValue.X);
 }
 
 void AAimTrainerCharacter::Input_Look(const FInputActionValue& Value)

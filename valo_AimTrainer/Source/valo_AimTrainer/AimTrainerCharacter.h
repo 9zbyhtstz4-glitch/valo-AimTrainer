@@ -1,12 +1,18 @@
 ﻿// AimTrainerCharacter: エイム練習用のFPSキャラクター
-// 【ステップ1の担当範囲】FPS視点カメラ + マウスによる視点操作(ヨー/ピッチ)のみ。
-// 移動・ジャンプ・しゃがみ・武器は今後のステップで追加する。
+// 【実装済みの範囲】
+//  - ステップ1: FPS視点カメラ + マウス視点操作(ヨー/ピッチ)
+//  - ステップ2: WASD移動(本ステップ)
+// ジャンプ・しゃがみ・武器は今後のステップで追加する。
 //
 // 入力について:
 //  - UE5標準の運用に合わせ、InputAction / InputMappingContext は
 //    エディタで作成したアセットを参照する(実行時生成はしない)。
-//  - 下記の DefaultMappingContext / LookAction は、本クラスを親とした
+//  - 下記の入力アセット参照は、本クラスを親とした
 //    Blueprint(BP_AimTrainerCharacter)側で割り当てる。
+//
+// 責務分離について:
+//  - 本クラスは「入力を移動の意図(方向×強さ)へ変換する」ところまでを担当し、
+//    実際の移動計算(加速・減速・速度上限・衝突)は CharacterMovementComponent に委譲する。
 #pragma once
 
 #include "CoreMinimal.h"
@@ -35,6 +41,11 @@ public:
 	UCameraComponent* GetFirstPersonCamera() const { return FirstPersonCamera; }
 
 protected:
+	//~ Begin AActor interface
+	/** Blueprint側で編集されたプロパティ値を移動コンポーネントへ反映する */
+	virtual void BeginPlay() override;
+	//~ End AActor interface
+
 	// ==============================
 	// コンポーネント
 	// ==============================
@@ -55,6 +66,22 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "AimTrainer|Input")
 	TObjectPtr<UInputAction> LookAction;
 
+	/** 移動アクション(IA_Move / Axis2D を割り当てる。X=右+, Y=前+) */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "AimTrainer|Input")
+	TObjectPtr<UInputAction> MoveAction;
+
+	// ==============================
+	// 移動設定
+	// ==============================
+
+	/**
+	 * 歩行速度(uu/s)。BeginPlay で CharacterMovementComponent の MaxWalkSpeed へ反映される。
+	 * 速度の上限管理は CharacterMovementComponent 側の責務のため、
+	 * 本クラスは値を渡すだけでフレームレートへの依存はない。
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "AimTrainer|Move", meta = (ClampMin = "1.0"))
+	float WalkSpeed = 540.f;
+
 	// ==============================
 	// 視点設定
 	// ==============================
@@ -74,6 +101,9 @@ protected:
 	// ==============================
 	// 入力コールバック
 	// ==============================
+
+	/** WASD移動。コントローラのヨーのみを基準に前後左右の移動入力を加える */
+	void Input_Move(const FInputActionValue& Value);
 
 	/** マウス視点。X=ヨー(左右), Y=ピッチ(上下) */
 	void Input_Look(const FInputActionValue& Value);
