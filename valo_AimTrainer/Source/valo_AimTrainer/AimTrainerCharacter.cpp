@@ -14,7 +14,7 @@
 
 AAimTrainerCharacter::AAimTrainerCharacter()
 {
-	// 視点・移動・ジャンプともイベント/コンポーネント駆動のため、本クラスのTickは不要
+	// 視点・移動・ジャンプ・しゃがみともイベント/コンポーネント駆動のため、本クラスのTickは不要
 	PrimaryActorTick.bCanEverTick = false;
 
 	// --- カプセル(当たり判定)の基本サイズ ---
@@ -23,6 +23,7 @@ AAimTrainerCharacter::AAimTrainerCharacter()
 	// --- FPS視点カメラ ---
 	// 目線高さ(カプセル中心から+64uu)に取り付ける。
 	// bUsePawnControlRotation によりピッチ/ヨーがコントローラ回転へ追従する。
+	// しゃがみ時はACharacter標準処理でカプセルが縮み、カメラも自動的に低くなる。
 	FirstPersonCamera = CreateDefaultSubobject<UCameraComponent>(TEXT("FirstPersonCamera"));
 	FirstPersonCamera->SetupAttachment(GetCapsuleComponent());
 	FirstPersonCamera->SetRelativeLocation(FVector(0.f, 0.f, 64.f));
@@ -35,12 +36,17 @@ AAimTrainerCharacter::AAimTrainerCharacter()
 	bUseControllerRotationPitch = false;
 	bUseControllerRotationRoll = false;
 
-	// --- 移動/ジャンプの既定値をエディタ表示と一致させる ---
+	// --- 移動/ジャンプ/しゃがみの既定値をエディタ表示と一致させる ---
 	// (Blueprint側で編集された場合は BeginPlay で再反映される)
 	UCharacterMovementComponent* Movement = GetCharacterMovement();
 	Movement->MaxWalkSpeed = WalkSpeed;
+	Movement->MaxWalkSpeedCrouched = CrouchedSpeed;
 	Movement->JumpZVelocity = JumpZVelocity;
 	Movement->GravityScale = GravityScale;
+
+	// しゃがみを有効化する。
+	// これを立てないと ACharacter::Crouch() が無視される点に注意。
+	Movement->GetNavAgentPropertiesRef().bCanCrouch = true;
 
 	// 連続ジャンプ(空中での多段ジャンプ)を許可しない。
 	// ※ACharacter の既定値も1だが、仕様として明示しておく。
@@ -52,10 +58,11 @@ void AAimTrainerCharacter::BeginPlay()
 	Super::BeginPlay();
 
 	// Blueprintやインスタンスで編集されたプロパティを移動コンポーネントへ反映する。
-	// ジャンプ・落下の物理計算は CharacterMovementComponent の責務
-	// (初速 JumpZVelocity を与えた後、重力を DeltaTime で積分する)。
+	// 立ち速度(MaxWalkSpeed)としゃがみ速度(MaxWalkSpeedCrouched)は別プロパティで管理し、
+	// しゃがみ状態に応じた上限の切り替えは CharacterMovementComponent が自動で行う。
 	UCharacterMovementComponent* Movement = GetCharacterMovement();
 	Movement->MaxWalkSpeed = WalkSpeed;
+	Movement->MaxWalkSpeedCrouched = CrouchedSpeed;
 	Movement->JumpZVelocity = JumpZVelocity;
 	Movement->GravityScale = GravityScale;
 }
@@ -122,6 +129,23 @@ void AAimTrainerCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInpu
 			TEXT("[AimTrainer] JumpAction が未割り当てです。BP_AimTrainerCharacter で IA_Jump を設定してください。"));
 	}
 
+	// しゃがみ(ホールド式): ACharacter 標準関数へ直接バインドする(独自のしゃがみ処理は作らない)。
+	//  - Started   = 押した瞬間 → Crouch()   … カプセル縮小・速度上限の切替はCMCが行う
+	//  - Completed = 離した瞬間 → UnCrouch() … 頭上に十分な空間ができるまで立ち上がりは
+	//                                          CMC標準処理で自動的に保留される(天井判定)
+	// 末尾の false は Crouch/UnCrouch の引数 bClientSimulation(サーバー主導の複製用)で、
+	// ローカル操作では常に false を渡す。
+	if (CrouchAction)
+	{
+		EIC->BindAction(CrouchAction, ETriggerEvent::Started, this, &ACharacter::Crouch, false);
+		EIC->BindAction(CrouchAction, ETriggerEvent::Completed, this, &ACharacter::UnCrouch, false);
+	}
+	else
+	{
+		UE_LOG(LogTemp, Warning,
+			TEXT("[AimTrainer] CrouchAction が未割り当てです。BP_AimTrainerCharacter で IA_Crouch を設定してください。"));
+	}
+
 	// 視点操作: マウス移動中は毎フレーム発火する Triggered にバインドする
 	if (LookAction)
 	{
@@ -150,7 +174,7 @@ void AAimTrainerCharacter::Input_Move(const FInputActionValue& Value)
 	const FVector ForwardDir = FRotationMatrix(YawRotation).GetUnitAxis(EAxis::X);
 	const FVector RightDir = FRotationMatrix(YawRotation).GetUnitAxis(EAxis::Y);
 
-	// 移動の「意図」だけを渡す。実際の加速・速度上限(MaxWalkSpeed)・衝突は
+	// 移動の「意図」だけを渡す。実際の加速・速度上限(立ち/しゃがみで自動切替)・衝突は
 	// CharacterMovementComponent が DeltaTime を用いて計算するため、
 	// 60fps/144fps以上でも最終的な移動速度は一定になる(フレームレート非依存)。
 	AddMovementInput(ForwardDir, MoveValue.Y);

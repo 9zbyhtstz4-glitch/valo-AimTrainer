@@ -2,8 +2,9 @@
 // 【実装済みの範囲】
 //  - ステップ1: FPS視点カメラ + マウス視点操作(ヨー/ピッチ)
 //  - ステップ2: WASD移動
-//  - ステップ3: ジャンプ(本ステップ)
-// しゃがみ・武器は今後のステップで追加する。
+//  - ステップ3: ジャンプ
+//  - ステップ4: しゃがみ(本ステップ)
+// 武器は今後のステップで追加する。
 //
 // 入力について:
 //  - UE5標準の運用に合わせ、InputAction / InputMappingContext は
@@ -13,7 +14,7 @@
 //
 // 責務分離について:
 //  - 本クラスは「入力を意図へ変換する」ところまでを担当し、
-//    移動・ジャンプの物理計算(加速・重力・速度上限・衝突)は
+//    移動・ジャンプ・しゃがみの物理計算(加速・重力・カプセル変形・天井判定)は
 //    ACharacter / CharacterMovementComponent の標準機能に委譲する。
 #pragma once
 
@@ -76,17 +77,28 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "AimTrainer|Input")
 	TObjectPtr<UInputAction> JumpAction;
 
+	/** しゃがみアクション(IA_Crouch / Digital(bool) を割り当てる。左Ctrlホールド) */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "AimTrainer|Input")
+	TObjectPtr<UInputAction> CrouchAction;
+
 	// ==============================
 	// 移動設定
 	// ==============================
 
 	/**
-	 * 歩行速度(uu/s)。BeginPlay で CharacterMovementComponent の MaxWalkSpeed へ反映される。
-	 * 速度の上限管理は CharacterMovementComponent 側の責務のため、
-	 * 本クラスは値を渡すだけでフレームレートへの依存はない。
+	 * 立ち状態の歩行速度(uu/s)。BeginPlay で CharacterMovementComponent の
+	 * MaxWalkSpeed へ反映される。しゃがみ速度(CrouchedSpeed)とは別管理。
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "AimTrainer|Move", meta = (ClampMin = "1.0"))
 	float WalkSpeed = 540.f;
+
+	/**
+	 * しゃがみ状態の歩行速度(uu/s)。BeginPlay で CharacterMovementComponent の
+	 * MaxWalkSpeedCrouched へ反映される。立ち状態(WalkSpeed)とは別管理で、
+	 * しゃがみ中はCMCが自動的にこちらの上限へ切り替える。
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "AimTrainer|Move", meta = (ClampMin = "1.0"))
+	float CrouchedSpeed = 270.f;
 
 	// ==============================
 	// ジャンプ設定
@@ -126,8 +138,9 @@ protected:
 	// ==============================
 	// 入力コールバック
 	// ==============================
-	// ジャンプは ACharacter 標準の Jump / StopJumping へ直接バインドするため
-	// 本クラスに独自のジャンプ関数は持たない(要件: 独自ジャンプ処理を作らない)。
+	// ジャンプ/しゃがみは ACharacter 標準の Jump/StopJumping・Crouch/UnCrouch へ
+	// 直接バインドするため、本クラスに独自の処理関数は持たない
+	// (要件: 独自のジャンプ・しゃがみ処理を作らない)。
 
 	/** WASD移動。コントローラのヨーのみを基準に前後左右の移動入力を加える */
 	void Input_Move(const FInputActionValue& Value);
