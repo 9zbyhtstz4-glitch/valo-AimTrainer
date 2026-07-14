@@ -2,25 +2,26 @@
 #include "AimTrainerGameMode.h"
 
 #include "AimTrainerCharacter.h"
-#include "UObject/ConstructorHelpers.h"
 
 AAimTrainerGameMode::AAimTrainerGameMode()
 {
-	// UE5テンプレート標準の運用に合わせる:
-	// 入力アセット(IMC_Default / IA_Look)を割り当てた Blueprint 版キャラクターを
-	// 既定ポーンとして読み込む。パスは固定(Content/Blueprints/BP_AimTrainerCharacter)。
-	static ConstructorHelpers::FClassFinder<APawn> PlayerPawnBPClass(
-		TEXT("/Game/Blueprints/BP_AimTrainerCharacter"));
-
-	if (PlayerPawnBPClass.Class != nullptr)
-	{
-		DefaultPawnClass = PlayerPawnBPClass.Class;
-	}
-	else
-	{
-		// Blueprint未作成でも起動だけはできるようC++クラスへフォールバックする。
-		// (この場合は入力アセット未割り当てのため視点操作はできない。
-		//  ログに警告が出るので BP_AimTrainerCharacter を作成すること)
-		DefaultPawnClass = AAimTrainerCharacter::StaticClass();
-	}
+	// 【設計方針】C++ から Content 内の Blueprint をパス検索・ハードコード参照しない。
+	//
+	// ここでは C++ 側の既定値として C++ キャラクターを指定するだけに留める
+	// (C++ → C++ の参照のみ。アセットへの依存なし)。
+	//
+	// 実際に使用するポーンの差し替えは UE5 標準の運用に従い、エディタ側で行う:
+	//   1. 本クラスを親にした BP_AimTrainerGameMode を作成する
+	//   2. その Details > Classes > Default Pawn Class に BP_AimTrainerCharacter を割り当てる
+	//   3. Project Settings > Maps & Modes > Default GameMode
+	//      (またはレベルの World Settings > GameMode Override)に
+	//      BP_AimTrainerGameMode を指定する
+	//
+	// ※C++ クラスのままでは Project Settings / World Settings の
+	//   「Selected GameMode > Default Pawn Class」欄は編集不可(グレーアウト)のため、
+	//   エディタから差し替えるには GameMode の Blueprint 化が必要になる。
+	//
+	// ※C++ キャラクター直のままPIEした場合、入力アセットが未割り当てのため
+	//   操作はできないが、その旨はキャラクター側の診断機能が画面に赤字で表示する。
+	DefaultPawnClass = AAimTrainerCharacter::StaticClass();
 }

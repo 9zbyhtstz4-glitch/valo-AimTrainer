@@ -3,7 +3,8 @@
 //  - ステップ1: FPS視点カメラ + マウス視点操作(ヨー/ピッチ)
 //  - ステップ2: WASD移動
 //  - ステップ3: ジャンプ
-//  - ステップ4: しゃがみ(本ステップ)
+//  - ステップ4: しゃがみ
+//  - バグ修正1: IMC登録タイミングの是正 + 入力設定不備の可視化
 // 武器は今後のステップで追加する。
 //
 // 入力について:
@@ -11,6 +12,8 @@
 //    エディタで作成したアセットを参照する(実行時生成はしない)。
 //  - 下記の入力アセット参照は、本クラスを親とした
 //    Blueprint(BP_AimTrainerCharacter)側で割り当てる。
+//  - IMCの登録は UE5.4以降のテンプレートと同じく NotifyControllerChanged で行う
+//    (コントローラ確定後に必ず呼ばれるため最も確実なタイミング)。
 //
 // 責務分離について:
 //  - 本クラスは「入力を意図へ変換する」ところまでを担当し、
@@ -36,7 +39,13 @@ public:
 	AAimTrainerCharacter();
 
 	//~ Begin APawn interface
-	/** Enhanced Input のマッピングコンテキスト登録と入力バインドを行う */
+	/**
+	 * コントローラ確定後に呼ばれる。ここで Input Mapping Context を
+	 * ローカルプレイヤーのサブシステムへ登録する(UE5テンプレート標準のタイミング)。
+	 */
+	virtual void NotifyControllerChanged() override;
+
+	/** Enhanced Input のアクションバインドを行う */
 	virtual void SetupPlayerInputComponent(UInputComponent* PlayerInputComponent) override;
 	//~ End APawn interface
 
@@ -139,8 +148,7 @@ protected:
 	// 入力コールバック
 	// ==============================
 	// ジャンプ/しゃがみは ACharacter 標準の Jump/StopJumping・Crouch/UnCrouch へ
-	// 直接バインドするため、本クラスに独自の処理関数は持たない
-	// (要件: 独自のジャンプ・しゃがみ処理を作らない)。
+	// 直接バインドするため、本クラスに独自の処理関数は持たない。
 
 	/** WASD移動。コントローラのヨーのみを基準に前後左右の移動入力を加える */
 	void Input_Move(const FInputActionValue& Value);

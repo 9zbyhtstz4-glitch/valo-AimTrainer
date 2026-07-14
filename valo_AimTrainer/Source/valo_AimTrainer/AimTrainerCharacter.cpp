@@ -5,12 +5,34 @@
 #include "Components/CapsuleComponent.h"
 #include "EnhancedInputComponent.h"
 #include "EnhancedInputSubsystems.h"
+#include "Engine/Engine.h"
 #include "Engine/LocalPlayer.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "GameFramework/PlayerController.h"
 #include "InputAction.h"
 #include "InputActionValue.h"
 #include "InputMappingContext.h"
+
+namespace
+{
+	/**
+	 * 入力セットアップの設定不備を「ログ」と「画面」の両方へ確実に出す。
+	 * ログのみの警告では今回のような無反応バグの原因究明が難しいため、
+	 * PIE中は画面左上へ赤字で15秒間表示する(Shippingビルドでは画面表示なし)。
+	 */
+	void ReportInputConfigProblem(const FString& Message)
+	{
+		UE_LOG(LogTemp, Error, TEXT("[AimTrainer] %s"), *Message);
+#if !UE_BUILD_SHIPPING
+		if (GEngine)
+		{
+			GEngine->AddOnScreenDebugMessage(
+				/*Key=*/INDEX_NONE, /*TimeToDisplay=*/15.f, FColor::Red,
+				FString::Printf(TEXT("[AimTrainer] %s"), *Message));
+		}
+#endif
+	}
+}
 
 AAimTrainerCharacter::AAimTrainerCharacter()
 {
@@ -67,12 +89,14 @@ void AAimTrainerCharacter::BeginPlay()
 	Movement->GravityScale = GravityScale;
 }
 
-void AAimTrainerCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputComponent)
+void AAimTrainerCharacter::NotifyControllerChanged()
 {
-	Super::SetupPlayerInputComponent(PlayerInputComponent);
+	Super::NotifyControllerChanged();
 
 	// --- マッピングコンテキストの登録 ---
-	// BP_AimTrainerCharacter で割り当てた IMC_Default をローカルプレイヤーへ登録する。
+	// UE5.4以降のテンプレートと同じく、コントローラ確定後に必ず呼ばれる本関数で登録する。
+	// SetupPlayerInputComponent 内での登録は「その時点でコントローラが取れること」が
+	// 前提になるため、登録漏れの単一障害点になり得る。ここに一本化する。
 	if (const APlayerController* PC = Cast<APlayerController>(GetController()))
 	{
 		if (UEnhancedInputLocalPlayerSubsystem* Subsystem =
@@ -80,24 +104,37 @@ void AAimTrainerCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInpu
 		{
 			if (DefaultMappingContext)
 			{
+				// 本関数は再Possess等で複数回呼ばれ得るため、二重登録を避けてから登録する
+				Subsystem->RemoveMappingContext(DefaultMappingContext);
 				Subsystem->AddMappingContext(DefaultMappingContext, /*Priority=*/0);
+
+				UE_LOG(LogTemp, Log, TEXT("[AimTrainer] IMC を登録しました: %s"),
+					*GetNameSafe(DefaultMappingContext));
 			}
 			else
 			{
-				// アセット未割り当ての検出用(C++クラスを直接スポーンした場合など)
-				UE_LOG(LogTemp, Warning,
-					TEXT("[AimTrainer] DefaultMappingContext が未割り当てです。BP_AimTrainerCharacter で IMC_Default を設定してください。"));
+				// ★入力が一切効かない場合の最有力原因その1★
+				ReportInputConfigProblem(TEXT(
+					"DefaultMappingContext が None です。入力は一切動作しません。"
+					"BP_AimTrainerCharacter の Details > AimTrainer|Input で IMC_Default を割り当ててください。"));
 			}
 		}
 	}
+}
+
+void AAimTrainerCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputComponent)
+{
+	Super::SetupPlayerInputComponent(PlayerInputComponent);
 
 	// --- 入力バインド ---
+	// ※IMCの登録は NotifyControllerChanged で行う(本関数はバインド専任)。
 	// DefaultInput.ini で EnhancedInputComponent を既定化済みのため通常はキャスト成功する。
 	UEnhancedInputComponent* EIC = Cast<UEnhancedInputComponent>(PlayerInputComponent);
 	if (!EIC)
 	{
-		UE_LOG(LogTemp, Error,
-			TEXT("[AimTrainer] EnhancedInputComponent が見つかりません。DefaultInput.ini の設定を確認してください。"));
+		ReportInputConfigProblem(TEXT(
+			"EnhancedInputComponent へのキャストに失敗しました。"
+			"DefaultInput.ini の DefaultInputComponentClass を確認してください。"));
 		return;
 	}
 
@@ -110,14 +147,12 @@ void AAimTrainerCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInpu
 	}
 	else
 	{
-		UE_LOG(LogTemp, Warning,
-			TEXT("[AimTrainer] MoveAction が未割り当てです。BP_AimTrainerCharacter で IA_Move を設定してください。"));
+		ReportInputConfigProblem(TEXT("MoveAction が None です(WASD移動不可)。BP_AimTrainerCharacter で IA_Move を割り当ててください。"));
 	}
 
 	// ジャンプ: ACharacter 標準関数へ直接バインドする(独自のジャンプ処理は作らない)。
 	//  - Started   = 押した瞬間に1回だけ発火 → Jump()
 	//  - Completed = 離した瞬間に発火       → StopJumping()
-	// Started はホールド中に再発火しないため、押しっぱなしによる連続ジャンプは発生しない。
 	if (JumpAction)
 	{
 		EIC->BindAction(JumpAction, ETriggerEvent::Started, this, &ACharacter::Jump);
@@ -125,16 +160,11 @@ void AAimTrainerCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInpu
 	}
 	else
 	{
-		UE_LOG(LogTemp, Warning,
-			TEXT("[AimTrainer] JumpAction が未割り当てです。BP_AimTrainerCharacter で IA_Jump を設定してください。"));
+		ReportInputConfigProblem(TEXT("JumpAction が None です(ジャンプ不可)。BP_AimTrainerCharacter で IA_Jump を割り当ててください。"));
 	}
 
-	// しゃがみ(ホールド式): ACharacter 標準関数へ直接バインドする(独自のしゃがみ処理は作らない)。
-	//  - Started   = 押した瞬間 → Crouch()   … カプセル縮小・速度上限の切替はCMCが行う
-	//  - Completed = 離した瞬間 → UnCrouch() … 頭上に十分な空間ができるまで立ち上がりは
-	//                                          CMC標準処理で自動的に保留される(天井判定)
-	// 末尾の false は Crouch/UnCrouch の引数 bClientSimulation(サーバー主導の複製用)で、
-	// ローカル操作では常に false を渡す。
+	// しゃがみ(ホールド式): ACharacter 標準関数へ直接バインドする。
+	// 末尾の false は Crouch/UnCrouch の引数 bClientSimulation(サーバー主導の複製用)。
 	if (CrouchAction)
 	{
 		EIC->BindAction(CrouchAction, ETriggerEvent::Started, this, &ACharacter::Crouch, false);
@@ -142,8 +172,7 @@ void AAimTrainerCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInpu
 	}
 	else
 	{
-		UE_LOG(LogTemp, Warning,
-			TEXT("[AimTrainer] CrouchAction が未割り当てです。BP_AimTrainerCharacter で IA_Crouch を設定してください。"));
+		ReportInputConfigProblem(TEXT("CrouchAction が None です(しゃがみ不可)。BP_AimTrainerCharacter で IA_Crouch を割り当ててください。"));
 	}
 
 	// 視点操作: マウス移動中は毎フレーム発火する Triggered にバインドする
@@ -153,8 +182,7 @@ void AAimTrainerCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInpu
 	}
 	else
 	{
-		UE_LOG(LogTemp, Warning,
-			TEXT("[AimTrainer] LookAction が未割り当てです。BP_AimTrainerCharacter で IA_Look を設定してください。"));
+		ReportInputConfigProblem(TEXT("LookAction が None です(視点操作不可)。BP_AimTrainerCharacter で IA_Look を割り当ててください。"));
 	}
 }
 
