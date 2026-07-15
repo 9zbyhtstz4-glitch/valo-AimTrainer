@@ -7,18 +7,25 @@
 #include "EnhancedInputSubsystems.h"
 #include "Engine/Engine.h"
 #include "Engine/LocalPlayer.h"
+#include "Engine/World.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "GameFramework/PlayerController.h"
+#include "HAL/IConsoleManager.h"
 #include "InputAction.h"
 #include "InputActionValue.h"
 #include "InputMappingContext.h"
 
+// 移動応答の実測HUD。コンソールで「at.MoveDebug 1」で有効化。
+// VALORANT側の実測(録画のフレーム数え等)と突き合わせるための計測ツール。
+static TAutoConsoleVariable<int32> CVarAimTrainerMoveDebug(
+	TEXT("at.MoveDebug"),
+	0,
+	TEXT("1=AimTrainerの移動計測HUDを表示(0->最高速 / キー解放->停止 / 逆キー->停止 の各ms)"),
+	ECVF_Default);
+
 namespace
 {
-	/**
-	 * 入力セットアップの設定不備を「ログ」と「画面」の両方へ確実に出す。
-	 * PIE中は画面左上へ赤字で15秒間表示する(Shippingビルドでは画面表示なし)。
-	 */
+	/** 入力セットアップの設定不備を「ログ」と「画面」の両方へ確実に出す */
 	void ReportInputConfigProblem(const FString& Message)
 	{
 		UE_LOG(LogTemp, Error, TEXT("[AimTrainer] %s"), *Message);
@@ -35,16 +42,13 @@ namespace
 
 AAimTrainerCharacter::AAimTrainerCharacter()
 {
-	// fix3: しゃがみ時のカメラ高さ補間のためTickを有効化する。
-	// Tick内の処理はFInterpTo一回のみで、負荷は無視できる。
+	// しゃがみカメラのブレンドと計測HUDのためTickを有効化(処理は軽量)
 	PrimaryActorTick.bCanEverTick = true;
 
-	// --- カプセル(当たり判定)の基本サイズ ---
-	// 立ち: 半径42 / 半分高さ96(全高192cm)。VALORANTのエージェント身長感に相当。
+	// --- カプセル: 立ち 半径42 / 半分高さ96(全高192cm) ---
 	GetCapsuleComponent()->InitCapsuleSize(42.f, 96.f);
 
-	// --- FPS視点カメラ ---
-	// 立ち目線=地上160uu(カプセル中心+64)。ピッチ/ヨーはコントローラ回転へ追従。
+	// --- FPS視点カメラ: 立ち目線=地上160uu ---
 	FirstPersonCamera = CreateDefaultSubobject<UCameraComponent>(TEXT("FirstPersonCamera"));
 	FirstPersonCamera->SetupAttachment(GetCapsuleComponent());
 	FirstPersonCamera->SetRelativeLocation(FVector(0.f, 0.f, StandingCameraHeight));
@@ -55,13 +59,13 @@ AAimTrainerCharacter::AAimTrainerCharacter()
 	bUseControllerRotationPitch = false;
 	bUseControllerRotationRoll = false;
 
-	// --- チューニング値の適用(エディタ表示用の既定値) ---
+	// --- チューニング値の適用 ---
 	ApplyCharacterSettings();
 
-	// しゃがみを有効化する(これを立てないと Crouch() が無視される)
+	// しゃがみ有効化(立てないと Crouch() が無視される)
 	GetCharacterMovement()->GetNavAgentPropertiesRef().bCanCrouch = true;
 
-	// 連続ジャンプ(空中での多段ジャンプ)を許可しない
+	// 多段ジャンプ禁止
 	JumpMaxCount = 1;
 }
 
@@ -69,19 +73,22 @@ void AAimTrainerCharacter::ApplyCharacterSettings()
 {
 	UCharacterMovementComponent* Movement = GetCharacterMovement();
 
-	// --- 速度(VALORANT: 走行5.4m/s、しゃがみ約半分) ---
+	// --- 速度 ---
 	Movement->MaxWalkSpeed = WalkSpeed;
 	Movement->MaxWalkSpeedCrouched = CrouchedSpeed;
 
-	// --- 加速・減速・摩擦(fix3の中核) ---
-	// UE既定(加速2048/制動2048/摩擦8)は慣性が強く「滑る」ため、
-	// VALORANTの「即応・低慣性・切り返しが利く」感覚へ寄せる。詳細はヘッダの各コメント参照。
+	// --- 加速・制動(fix4の中核。根拠はヘッダの各プロパティコメント参照) ---
+	// 加速8192: 0.066秒で最高速(「押した瞬間ほぼ最高速」の証言に整合)
+	// 制動8192: 解放でも0.066秒で停止 → 逆キーとの差は約20msとなり
+	//           「カウンターストレイフの短縮は数ms程度」の証言に整合
 	Movement->MaxAcceleration = MoveAcceleration;
 	Movement->BrakingDecelerationWalking = MoveBrakingDeceleration;
 	Movement->GroundFriction = MoveGroundFriction;
 
-	// 制動専用摩擦を有効化。BrakingFrictionFactor(既定2)を1へ固定し、
-	// MoveBrakingFriction の値がそのまま効くようにして調整を単純化する。
+	// 制動プロファイルの線形化(fix4):
+	// BrakingFriction=0 とし速度比例項を排除 → 一定減速のみの直線的な停止になり、
+	// 「短い滑り→ピタッと停止」というVALORANTの見た目に一致させる。
+	// BrakingFrictionFactor は1に固定し、MoveBrakingFriction の値がそのまま効くようにする。
 	Movement->bUseSeparateBrakingFriction = true;
 	Movement->BrakingFriction = MoveBrakingFriction;
 	Movement->BrakingFrictionFactor = 1.f;
@@ -89,11 +96,11 @@ void AAimTrainerCharacter::ApplyCharacterSettings()
 	// --- 空中 ---
 	Movement->AirControl = AirControlAmount;
 
-	// --- ジャンプ・重力(VALORANT: 短く鋭いジャンプ) ---
+	// --- ジャンプ・重力(fix4では変更なし) ---
 	Movement->JumpZVelocity = JumpZVelocity;
 	Movement->GravityScale = GravityScale;
 
-	// --- しゃがみカプセル(立ち96 → しゃがみ60。半径は不変) ---
+	// --- しゃがみカプセル ---
 	Movement->SetCrouchedHalfHeight(CrouchedCapsuleHalfHeight);
 
 	// --- カメラFOV(VALORANT: 水平103固定) ---
@@ -107,72 +114,180 @@ void AAimTrainerCharacter::BeginPlay()
 {
 	Super::BeginPlay();
 
-	// Blueprintやインスタンスで編集されたプロパティを実行時コンポーネントへ反映する
+	// Blueprintやインスタンスで編集されたプロパティを実行時コンポーネントへ反映
 	ApplyCharacterSettings();
 }
 
 // ==============================
-// しゃがみのスムーズ化(fix3)
+// しゃがみカメラ: 固定時間ブレンド(fix4)
 // ==============================
-// 従来はカプセル縮小と同時にカメラのワールド高さが1フレームで約50uu落ちて
-// 「視点が急激に下がる」違和感があった。fix3では
-//   (1) OnStartCrouch/OnEndCrouch でカプセル中心の移動量ぶんだけカメラの相対Zを
-//       即時に打ち消し、視点のワールド高さを変化させない
-//   (2) その後 Tick の FInterpTo で目標高さへ滑らかに移行する
-// の2段構えで、VALORANTのようにスッと沈む/立つカメラを実現する。
-// カプセル(当たり判定)自体はACharacter標準どおり即時に変形するため、
-// 天井判定・しゃがみ速度などの既存挙動は一切変わらない。
+// fix3のFInterpTo(指数補間)は終端が漸近するため「いつ完了したか」が曖昧で、
+// VALORANTの「一定時間で必ず完了する」しゃがみモーションと質感が異なった。
+// fix4では (1)OnStart/OnEndCrouchでカプセル中心移動をカメラ相対Zへ即時打ち消し
+//          (2)固定時間(CrouchTransitionTime)+SmoothStepのS字カーブで目標へ移行
+// とする。途中でしゃがみ↔立ちが反転しても、現在位置を起点に再ブレンドする。
+// カプセル(当たり判定)は従来どおり即時変形のため、天井判定等の挙動は不変。
 
 float AAimTrainerCharacter::GetTargetCameraHeight() const
 {
 	return bIsCrouched ? CrouchedCameraHeight : StandingCameraHeight;
 }
 
+void AAimTrainerCharacter::StartCameraHeightBlend()
+{
+	if (FirstPersonCamera)
+	{
+		CameraBlendStartZ = FirstPersonCamera->GetRelativeLocation().Z;
+		CameraBlendElapsed = 0.f;
+	}
+}
+
 void AAimTrainerCharacter::OnStartCrouch(float HalfHeightAdjust, float ScaledHalfHeightAdjust)
 {
 	Super::OnStartCrouch(HalfHeightAdjust, ScaledHalfHeightAdjust);
 
-	// カプセル中心は ScaledHalfHeightAdjust だけ下がったので、
-	// 同量をカメラの相対Zへ足して視点のワールド高さを維持する(以後Tickで補間)。
+	// カプセル中心が ScaledHalfHeightAdjust 下がったぶんを相対Zへ足し、
+	// 視点のワールド高さを一瞬も変化させない(その後ブレンドで沈む)
 	if (FirstPersonCamera)
 	{
 		FVector CamLoc = FirstPersonCamera->GetRelativeLocation();
 		CamLoc.Z += ScaledHalfHeightAdjust;
 		FirstPersonCamera->SetRelativeLocation(CamLoc);
 	}
+	StartCameraHeightBlend();
 }
 
 void AAimTrainerCharacter::OnEndCrouch(float HalfHeightAdjust, float ScaledHalfHeightAdjust)
 {
 	Super::OnEndCrouch(HalfHeightAdjust, ScaledHalfHeightAdjust);
 
-	// カプセル中心は ScaledHalfHeightAdjust だけ上がったので、逆に引いて維持する。
+	// カプセル中心が上がったぶんを逆に引いて視点高さを維持(その後ブレンドで立つ)
 	if (FirstPersonCamera)
 	{
 		FVector CamLoc = FirstPersonCamera->GetRelativeLocation();
 		CamLoc.Z -= ScaledHalfHeightAdjust;
 		FirstPersonCamera->SetRelativeLocation(CamLoc);
 	}
+	StartCameraHeightBlend();
 }
 
 void AAimTrainerCharacter::Tick(float DeltaSeconds)
 {
 	Super::Tick(DeltaSeconds);
 
-	// カメラの相対高さを目標値へ補間する(しゃがみ/立ちの遷移中のみ実際に動く)。
-	// FInterpToは指数的に収束するため、VALORANTのしゃがみモーションのような
-	// 「最初速く、終わり際は緩やか」なカーブになる。
-	if (FirstPersonCamera)
+	// --- しゃがみカメラの固定時間ブレンド ---
+	if (FirstPersonCamera && CameraBlendElapsed >= 0.f)
 	{
-		FVector CamLoc = FirstPersonCamera->GetRelativeLocation();
-		const float TargetZ = GetTargetCameraHeight();
+		CameraBlendElapsed += DeltaSeconds;
 
-		if (!FMath::IsNearlyEqual(CamLoc.Z, TargetZ, 0.01f))
+		const float Duration = FMath::Max(CrouchTransitionTime, 0.01f);
+		const float Alpha = FMath::Clamp(CameraBlendElapsed / Duration, 0.f, 1.f);
+
+		// SmoothStep: 入り/抜きが滑らかなS字。DeltaTimeを直接乗じないため
+		// フレームレートに依らず同じ時間・同じ軌跡で完了する。
+		const float Eased = FMath::SmoothStep(0.f, 1.f, Alpha);
+
+		FVector CamLoc = FirstPersonCamera->GetRelativeLocation();
+		CamLoc.Z = FMath::Lerp(CameraBlendStartZ, GetTargetCameraHeight(), Eased);
+		FirstPersonCamera->SetRelativeLocation(CamLoc);
+
+		if (Alpha >= 1.f)
 		{
-			CamLoc.Z = FMath::FInterpTo(CamLoc.Z, TargetZ, DeltaSeconds, CrouchCameraInterpSpeed);
-			FirstPersonCamera->SetRelativeLocation(CamLoc);
+			CameraBlendElapsed = -1.f; // 完了
 		}
 	}
+
+	// --- 移動計測HUD(at.MoveDebug 1 のときのみ) ---
+	UpdateMovementDebug();
+}
+
+// ==============================
+// 移動計測HUD(fix4)
+// ==============================
+// VALORANTとの差分を「体感」でなく「ミリ秒」で比較するための計測ツール。
+// 表示値をVALORANT側の実測(高fps録画のフレーム数え等)と突き合わせ、
+// MoveAcceleration / MoveBrakingDeceleration を調整する運用を想定。
+
+void AAimTrainerCharacter::UpdateMovementDebug()
+{
+#if !UE_BUILD_SHIPPING
+	if (CVarAimTrainerMoveDebug.GetValueOnGameThread() == 0 || !GEngine || !GetWorld())
+	{
+		return;
+	}
+
+	const UCharacterMovementComponent* Movement = GetCharacterMovement();
+	const FVector Accel = Movement->GetCurrentAcceleration();
+	FVector Vel = GetVelocity();
+	Vel.Z = 0.f;
+
+	const float Speed = Vel.Size();
+	const float TopSpeed = FMath::Max(Movement->MaxWalkSpeed, 1.f);
+	const float Now = GetWorld()->GetTimeSeconds();
+	const bool bHasInput = !Accel.IsNearlyZero();
+
+	// 現在速度(キー固定=毎フレーム上書き表示)
+	GEngine->AddOnScreenDebugMessage(9001, 0.f, FColor::Cyan,
+		FString::Printf(TEXT("[MoveDebug] Speed %4.0f uu/s (%3.0f%%)"), Speed, Speed / TopSpeed * 100.f));
+
+	// --- 計測1: 入力開始 → 最高速95%到達 ---
+	if (bHasInput && !bDbgPrevHasInput && Speed < 30.f)
+	{
+		DbgAccelStartTime = Now;
+	}
+	if (!bHasInput)
+	{
+		DbgAccelStartTime = -1.f; // 途中でキーを離したら計測破棄
+	}
+	if (DbgAccelStartTime >= 0.f && Speed >= TopSpeed * 0.95f)
+	{
+		GEngine->AddOnScreenDebugMessage(9002, 5.f, FColor::Green,
+			FString::Printf(TEXT("[MoveDebug] 0 -> 95%%最高速 : %4.0f ms"), (Now - DbgAccelStartTime) * 1000.f));
+		DbgAccelStartTime = -1.f;
+	}
+
+	// --- 計測2: キー解放 → 停止 ---
+	if (!bHasInput && bDbgPrevHasInput && Speed > TopSpeed * 0.5f)
+	{
+		DbgBrakeStartTime = Now;
+	}
+	if (bHasInput)
+	{
+		DbgBrakeStartTime = -1.f; // 制動中に再入力したら計測破棄
+	}
+	if (DbgBrakeStartTime >= 0.f && Speed <= 5.f)
+	{
+		GEngine->AddOnScreenDebugMessage(9003, 5.f, FColor::Yellow,
+			FString::Printf(TEXT("[MoveDebug] キー解放 -> 停止 : %4.0f ms"), (Now - DbgBrakeStartTime) * 1000.f));
+		DbgBrakeStartTime = -1.f;
+	}
+
+	// --- 計測3: 逆キー入力 → 速度反転点(カウンターストレイフの停止時間) ---
+	const FVector VelDir = Vel.GetSafeNormal();
+	const FVector AccelDir = Accel.GetSafeNormal();
+	const float MoveDot = FVector::DotProduct(VelDir, AccelDir);
+
+	if (DbgFlipStartTime < 0.f && bHasInput && Speed > TopSpeed * 0.5f && MoveDot < -0.7f)
+	{
+		DbgFlipStartTime = Now; // ほぼ真逆の入力を検出
+	}
+	if (DbgFlipStartTime >= 0.f)
+	{
+		if (!bHasInput)
+		{
+			DbgFlipStartTime = -1.f; // キーを離したら計測破棄(計測2に該当)
+		}
+		else if (Speed <= 20.f || MoveDot > 0.2f)
+		{
+			// 速度がほぼゼロ、または速度が入力方向へ反転した時点=射撃可能になる瞬間
+			GEngine->AddOnScreenDebugMessage(9004, 5.f, FColor::Orange,
+				FString::Printf(TEXT("[MoveDebug] 逆キー -> 停止 : %4.0f ms"), (Now - DbgFlipStartTime) * 1000.f));
+			DbgFlipStartTime = -1.f;
+		}
+	}
+
+	bDbgPrevHasInput = bHasInput;
+#endif
 }
 
 // ==============================
@@ -183,7 +298,6 @@ void AAimTrainerCharacter::NotifyControllerChanged()
 {
 	Super::NotifyControllerChanged();
 
-	// --- マッピングコンテキストの登録(UE5テンプレート標準タイミング) ---
 	if (const APlayerController* PC = Cast<APlayerController>(GetController()))
 	{
 		if (UEnhancedInputLocalPlayerSubsystem* Subsystem =
@@ -191,7 +305,6 @@ void AAimTrainerCharacter::NotifyControllerChanged()
 		{
 			if (DefaultMappingContext)
 			{
-				// 再Possess等で複数回呼ばれ得るため、二重登録を避けてから登録する
 				Subsystem->RemoveMappingContext(DefaultMappingContext);
 				Subsystem->AddMappingContext(DefaultMappingContext, /*Priority=*/0);
 
@@ -212,7 +325,6 @@ void AAimTrainerCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInpu
 {
 	Super::SetupPlayerInputComponent(PlayerInputComponent);
 
-	// --- 入力バインド(IMCの登録は NotifyControllerChanged で実施済み) ---
 	UEnhancedInputComponent* EIC = Cast<UEnhancedInputComponent>(PlayerInputComponent);
 	if (!EIC)
 	{
@@ -222,7 +334,6 @@ void AAimTrainerCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInpu
 		return;
 	}
 
-	// 移動: 押下中は毎Tick発火する Triggered。移動計算はCMCがDeltaTimeで行うためFPS非依存。
 	if (MoveAction)
 	{
 		EIC->BindAction(MoveAction, ETriggerEvent::Triggered, this, &AAimTrainerCharacter::Input_Move);
@@ -232,7 +343,6 @@ void AAimTrainerCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInpu
 		ReportInputConfigProblem(TEXT("MoveAction が None です(WASD移動不可)。BP_AimTrainerCharacter で IA_Move を割り当ててください。"));
 	}
 
-	// ジャンプ: ACharacter標準関数へ直接バインド(Started=押下/Completed=解放)
 	if (JumpAction)
 	{
 		EIC->BindAction(JumpAction, ETriggerEvent::Started, this, &ACharacter::Jump);
@@ -243,8 +353,6 @@ void AAimTrainerCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInpu
 		ReportInputConfigProblem(TEXT("JumpAction が None です(ジャンプ不可)。BP_AimTrainerCharacter で IA_Jump を割り当ててください。"));
 	}
 
-	// しゃがみ(ホールド式): ACharacter標準関数へ直接バインド。
-	// 末尾の false は bClientSimulation(サーバー主導の複製用)。
 	if (CrouchAction)
 	{
 		EIC->BindAction(CrouchAction, ETriggerEvent::Started, this, &ACharacter::Crouch, false);
@@ -255,7 +363,6 @@ void AAimTrainerCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInpu
 		ReportInputConfigProblem(TEXT("CrouchAction が None です(しゃがみ不可)。BP_AimTrainerCharacter で IA_Crouch を割り当ててください。"));
 	}
 
-	// 視点操作
 	if (LookAction)
 	{
 		EIC->BindAction(LookAction, ETriggerEvent::Triggered, this, &AAimTrainerCharacter::Input_Look);
@@ -273,7 +380,6 @@ void AAimTrainerCharacter::Input_Move(const FInputActionValue& Value)
 		return;
 	}
 
-	// IA_Move は Axis2D(X=右+, Y=前+)。値の組み立てはIMC側のモディファイアが行う。
 	const FVector2D MoveValue = Value.Get<FVector2D>();
 
 	// 視点のヨーのみを基準に、水平な前方向・右方向を求める
@@ -281,31 +387,23 @@ void AAimTrainerCharacter::Input_Move(const FInputActionValue& Value)
 	const FVector ForwardDir = FRotationMatrix(YawRotation).GetUnitAxis(EAxis::X);
 	const FVector RightDir = FRotationMatrix(YawRotation).GetUnitAxis(EAxis::Y);
 
-	// 移動の「意図」だけを渡す。加速・制動・摩擦(fix3で調整)はCMCが計算する。
+	// 移動の「意図」だけを渡す。加速・制動・摩擦(fix4で調整)はCMCがDeltaTimeで計算する
 	AddMovementInput(ForwardDir, MoveValue.Y);
 	AddMovementInput(RightDir, MoveValue.X);
 }
 
 void AAimTrainerCharacter::Input_Look(const FInputActionValue& Value)
 {
-	// IA_Look は Axis2D(X=マウス左右, Y=マウス上下)
+	// 【感度式(fix3で確定・fix4検証済み)】
+	// 回転角 = マウスカウント × 0.07(DefaultInput.iniのMouse2D係数) × MouseSensitivity
+	// これはVALORANTの感度式と同一。Enhanced Inputが渡す値は
+	// 「前フレームからのカウント差分の合計」であり、ここでDeltaTimeを乗じないため
+	// 総回転角はフレームレートに依存しない(60fpsでも240fpsでも同じ距離=同じ角度)。
+	// スムージング(bEnableMouseSmoothing=False)とFOVスケーリングも無効化済み。
 	const FVector2D LookValue = Value.Get<FVector2D>();
 
-	// 【fix3: 感度スケールについて】
-	// DefaultInput.ini で
-	//   ・bEnableLegacyInputScales=False(旧来のYaw×2.5/Pitch×-2.5を廃止)
-	//   ・bEnableMouseSmoothing=False(スムージング廃止=生入力)
-	//   ・bEnableFOVScaling=False(FOVによる感度変化を廃止)
-	// とした結果、回転角 = カウント数 × 0.07(ini側のMouse2D係数) × MouseSensitivity。
-	// これはVALORANTの感度式(0.07°/カウント×感度)と同一なので、
-	// MouseSensitivity に普段のVALORANT感度をそのまま入力すれば振り向きが一致する。
-
-	// ヨー: マウス右で右を向く
 	AddControllerYawInput(LookValue.X * MouseSensitivity);
 
-	// ピッチ: LegacyInputScales廃止により符号系がfix2までと逆転している点に注意。
-	// 旧: Pitchに-2.5が掛かるため C++側で-1を掛けて相殺していた。
-	// 新: スケール無し(+1)のため、マウス上(+Y)をそのまま足せば見上げる方向になる。
 	const float PitchSign = bInvertLookY ? -1.f : 1.f;
 	AddControllerPitchInput(LookValue.Y * PitchSign * MouseSensitivity);
 }
