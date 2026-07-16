@@ -3,7 +3,13 @@
 //  - ステップ1〜4: FPS視点/マウス視点・WASD移動・ジャンプ・しゃがみ
 //  - fix2: IMC登録タイミングの是正 + 入力設定不備の可視化
 //  - fix3: VALORANT準拠チューニング(移動加減速/スムーズしゃがみ/感度式統一/FOV103)
-//  - fix4: VALORANTとの差分分析に基づく再調整(本修正)
+//  - fix4: VALORANTとの差分分析に基づく再調整
+//  - fix5: 実機録画の光学解析による実測値でパラメータを確定
+//  - fix6: 検証システム化(本修正)
+//      * 計測ロジックを UMovementTestingComponent へ分離(統計/CSV/レポート)
+//      * F5=計測開始 / F6=終了+レポート / F7=途中レポート
+//      * チューニング値を Config 化(Config/DefaultGame.ini から変更可能。
+//        以後の調整は「ini変更→計測→比較」だけで完結し、コード変更不要)
 //      * 移動: 「ほぼ即時に最高速/解放でもほぼ即停止/逆キーの短縮は数ms程度」という
 //              公開証言に合わせ、加速・制動を8192へ引き上げ+減速プロファイルを線形化
 //      * しゃがみ: 指数補間(終端が漸近して完了しない)を廃止し、
@@ -20,11 +26,12 @@
 #include "AimTrainerCharacter.generated.h"
 
 class UCameraComponent;
+class UMovementTestingComponent;
 class UInputAction;
 class UInputMappingContext;
 struct FInputActionValue;
 
-UCLASS()
+UCLASS(config = Game)
 class VALO_AIMTRAINER_API AAimTrainerCharacter : public ACharacter
 {
 	GENERATED_BODY()
@@ -51,6 +58,12 @@ public:
 	/** FPSカメラ取得(今後、武器の射線計算やHUDで使用する) */
 	UCameraComponent* GetFirstPersonCamera() const { return FirstPersonCamera; }
 
+	/** しゃがみカメラのブレンド中か(計測コンポーネントが沈み完了判定に使用) */
+	bool IsCameraBlending() const { return CameraBlendElapsed >= 0.f; }
+
+	/** しゃがみ状態に応じた目標カメラ相対高さ */
+	float GetTargetCameraHeight() const;
+
 protected:
 	//~ Begin AActor interface
 	virtual void BeginPlay() override;
@@ -65,6 +78,10 @@ protected:
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "AimTrainer|Camera")
 	TObjectPtr<UCameraComponent> FirstPersonCamera;
+
+	/** fix6: 計測・統計・CSV・レポートを担う検証コンポーネント(F5/F6/F7で操作) */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "AimTrainer|Testing")
+	TObjectPtr<UMovementTestingComponent> TestingComponent;
 
 	// ==============================
 	// 入力アセット(Blueprint側で割り当てる)
@@ -90,41 +107,43 @@ protected:
 	// ==============================
 
 	/** 【確定】走行速度 5.4m/s(Riot公表のエージェント基本移動速度)= 540uu/s */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "AimTrainer|Move", meta = (ClampMin = "1.0"))
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "AimTrainer|Move", meta = (ClampMin = "1.0"))
 	float WalkSpeed = 540.f;
 
 	/** しゃがみ移動速度。【推測】走行の半分(公式数値は非公開) */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "AimTrainer|Move", meta = (ClampMin = "1.0"))
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "AimTrainer|Move", meta = (ClampMin = "1.0"))
 	float CrouchedSpeed = 270.f;
 
 	/**
-	 * 最大加速度(uu/s^2)。fix3の4096(0.132秒で最高速)では「もたつき」が残った。
-	 * VALORANTは「押した瞬間ほぼ最高速」と形容されるほど加速が速いという
-	 * 公開証言(VLR等のプレイヤー/プロの議論)に合わせ、8192へ引き上げる。
-	 * 540/8192 ≒ 0.066秒で最高速到達。【推測】厳密な内部値は非公開のため、
-	 * 0.066秒は目標値であり at.MoveDebug で実測しながら調整可能にしてある。
+	 * 最大加速度(uu/s^2)。
+	 * 【実測】VALORANT録画のA/D/AD全11試行を整列平均した加速カーブより
+	 *   20-80%到達=106ms, 10-90%=149ms → a = 0.6×540/0.106 ≒ 3057,
+	 *   0.8×540/0.149 ≒ 2899。両推定の中間の3000を採用(最高速まで180ms)。
+	 * 補足: コミュニティの「押した瞬間最高速」という証言は実測と一致しなかった
+	 * (fix4の8192は速すぎた)。実測を優先する。
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "AimTrainer|Move", meta = (ClampMin = "1.0"))
-	float MoveAcceleration = 8192.f;
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "AimTrainer|Move", meta = (ClampMin = "1.0"))
+	float MoveAcceleration = 3000.f;
 
 	/**
 	 * キー解放時の制動減速度(uu/s^2)。
-	 * VALORANTは「解放だけでもCSより明確に速く止まり、カウンターストレイフの
-	 * 短縮効果は数ms〜わずか」という公開情報が複数ある(Dot Esports / VLR)。
-	 * これをUEの挙動へ写像すると「解放時の制動 ≒ 逆キー時の制動」が必要なため、
-	 * MoveAcceleration と同値の8192とする(解放停止 540/8192 ≒ 0.066秒、
-	 * 滑走距離 540^2/(2×8192) ≒ 18cm。逆キー時は旋回摩擦が加わり約0.04〜0.05秒
-	 * → 差は約20ms で「数msしか変わらない」証言と整合)。【推測】数値自体は目標値。
+	 * 【実測】解放停止カーブ(n=8整列平均)の20-80%減速=43ms
+	 *   → D = 0.6×540/0.043 ≒ 7535 → 7500を採用。
+	 *   全停止まで約72ms・滑走距離 540^2/(2×7500) ≒ 19cm。
+	 * 実測では「解放停止(43ms)は逆キー減速(62ms)より速い」= VALORANTでは
+	 * カウンターストレイフの利得がほぼ無い、という通説どおりの結果になった。
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "AimTrainer|Move", meta = (ClampMin = "0.0"))
-	float MoveBrakingDeceleration = 8192.f;
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "AimTrainer|Move", meta = (ClampMin = "0.0"))
+	float MoveBrakingDeceleration = 7500.f;
 
 	/**
-	 * 地上摩擦(移動中の方向転換の鋭さ)。A⇔D切り返しで旧速度を打ち消す強さ。
-	 * fix3の10を維持(UE既定8では横滑りが残る)。【推測】
+	 * 地上摩擦(逆キー押下中に旧速度を打ち消す強さ。UEでは減速レート≒2f×v+加速度)。
+	 * 【実測】逆キー減速カーブ(n=3)の20-80%=62ms を a=3000 と組み合わせて逆算:
+	 *   ∫dv/(2f·v+3000) [108→432] = 0.062 → f ≒ 4〜5 → 4.5を採用。
+	 * fix4の10では逆キーが実測より効きすぎていた。
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "AimTrainer|Move", meta = (ClampMin = "0.0"))
-	float MoveGroundFriction = 10.f;
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "AimTrainer|Move", meta = (ClampMin = "0.0"))
+	float MoveGroundFriction = 4.5f;
 
 	/**
 	 * 制動時専用の摩擦。fix4で 10 → 0 へ変更(重要)。
@@ -133,64 +152,76 @@ protected:
 	 * 見えるため(【推測】映像目視)、摩擦0+一定減速のみの線形プロファイルとし、
 	 * 停止完了時刻を明確にする。調整したい場合のためプロパティは残す。
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "AimTrainer|Move", meta = (ClampMin = "0.0"))
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "AimTrainer|Move", meta = (ClampMin = "0.0"))
 	float MoveBrakingFriction = 0.f;
 
 	/** 空中制御(0〜1)。【推測】VALORANTは空中でわずかに軌道修正できる程度 */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "AimTrainer|Move", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "AimTrainer|Move", meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float AirControlAmount = 0.15f;
 
 	// ==============================
 	// ジャンプ設定(fix4では対象外・fix3の値を維持)
 	// ==============================
 
-	/** 【推測】高さ約76cm・滞空約0.66秒(GravityScale=1.4との組) */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "AimTrainer|Jump", meta = (ClampMin = "1.0"))
-	float JumpZVelocity = 456.f;
+	/**
+	 * 【実測】VALORANT録画のジャンプ滞空時間 = 756±8ms (n=3)。
+	 * t=2v/g より、GravityScale=1.0(g=980) との組で v=370 → 滞空755ms・高さ約70cm。
+	 * (fix4の456/1.4=滞空665msは実測より約90ms短かった)
+	 */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "AimTrainer|Jump", meta = (ClampMin = "1.0"))
+	float JumpZVelocity = 370.f;
 
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "AimTrainer|Jump", meta = (ClampMin = "0.1"))
-	float GravityScale = 1.4f;
+	/** 【実測由来】滞空756msと高さ約70cmを両立する現実重力相当(1.0) */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "AimTrainer|Jump", meta = (ClampMin = "0.1"))
+	float GravityScale = 1.0f;
 
 	// ==============================
 	// しゃがみ設定(fix4: 固定時間ブレンドへ変更)
 	// ==============================
 
 	/** しゃがみ時のカプセル半分高さ。立ち96→60(全高192→120cm)。【推測】半径42は不変 */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "AimTrainer|Crouch", meta = (ClampMin = "30.0"))
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "AimTrainer|Crouch", meta = (ClampMin = "30.0"))
 	float CrouchedCapsuleHalfHeight = 60.f;
 
 	/** 立ち状態のカメラ高さ(カプセル中心からの相対Z)。目線=地上160uu【推測】 */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "AimTrainer|Crouch")
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "AimTrainer|Crouch")
 	float StandingCameraHeight = 64.f;
 
 	/** しゃがみ状態のカメラ高さ。目線=地上110uu【推測】 */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "AimTrainer|Crouch")
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "AimTrainer|Crouch")
 	float CrouchedCameraHeight = 50.f;
 
 	/**
-	 * しゃがみ/立ちのカメラ遷移にかける時間(秒)。fix4で補間方式を変更:
-	 *  fix3: FInterpTo(指数)= 立ち上がりは速いが終端が漸近し「いつ終わったか」が曖昧
-	 *  fix4: 固定時間 + SmoothStep = VALORANTのように一定時間で必ず完了し、
-	 *        入り/抜きが滑らかなS字カーブ
-	 * 0.25秒は映像の目視による【推測】値。途中で反転しても現在位置から再ブレンドする。
+	 * しゃがみ/立ちのカメラ遷移にかける時間(秒)。
+	 * 【実測】VALORANT録画: 沈み 311±8ms (n=3) / 立ち 300±0ms (n=3) → 0.30を採用。
+	 * 途中で反転しても現在位置から再ブレンドする。
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "AimTrainer|Crouch", meta = (ClampMin = "0.01"))
-	float CrouchTransitionTime = 0.25f;
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "AimTrainer|Crouch", meta = (ClampMin = "0.01"))
+	float CrouchTransitionTime = 0.30f;
+
+	/**
+	 * しゃがみカメラのイージング指数(1.0=等速, 2.0=強いS字)。
+	 * 【実測】遷移中の縦速度カーブのピーク/平均比 = 1.20〜1.24。
+	 * SmoothStep相当(比1.5)よりフラットなため、InterpEaseInOutの指数1.3で再現する
+	 * (指数eのとき中央速度/平均速度 ≒ e)。
+	 */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "AimTrainer|Crouch", meta = (ClampMin = "1.0", ClampMax = "3.0"))
+	float CrouchEaseExponent = 1.3f;
 
 	// ==============================
 	// 視点設定(fix3で確定済み・変更なし)
 	// ==============================
 
 	/** 【確定】VALORANTのゲーム内感度と同一スケール(0.07°/カウント×感度) */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "AimTrainer|Look", meta = (ClampMin = "0.01"))
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "AimTrainer|Look", meta = (ClampMin = "0.01"))
 	float MouseSensitivity = 0.5f;
 
 	/** 上下視点の反転(既定falseで「マウス上=見上げる」) */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "AimTrainer|Look")
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "AimTrainer|Look")
 	bool bInvertLookY = false;
 
 	/** 【確定】VALORANTは水平FOV=103固定 */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "AimTrainer|Look", meta = (ClampMin = "60.0", ClampMax = "140.0"))
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "AimTrainer|Look", meta = (ClampMin = "60.0", ClampMax = "140.0"))
 	float CameraFOV = 103.f;
 
 	// ==============================
@@ -203,9 +234,6 @@ protected:
 private:
 	// --- しゃがみカメラの固定時間ブレンド ---
 
-	/** しゃがみ状態に応じた目標カメラ相対高さ */
-	float GetTargetCameraHeight() const;
-
 	/** 現在のカメラ高さを起点にブレンドを開始する(途中反転にも対応) */
 	void StartCameraHeightBlend();
 
@@ -215,13 +243,5 @@ private:
 	/** ブレンド経過秒。負の値は「補間停止中」を表す */
 	float CameraBlendElapsed = -1.f;
 
-	// --- 移動計測HUD(at.MoveDebug 1 で有効。Shippingでは何もしない) ---
-
-	/** 0→最高速 / 解放→停止 / 逆キー→停止 の各時間を実測して画面表示する */
-	void UpdateMovementDebug();
-
-	float DbgAccelStartTime = -1.f;
-	float DbgBrakeStartTime = -1.f;
-	float DbgFlipStartTime = -1.f;
-	bool bDbgPrevHasInput = false;
+	// 計測HUD・統計・CSV・レポートは UMovementTestingComponent へ移設(fix6)
 };

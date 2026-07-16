@@ -10,18 +10,10 @@
 #include "Engine/World.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "GameFramework/PlayerController.h"
-#include "HAL/IConsoleManager.h"
 #include "InputAction.h"
 #include "InputActionValue.h"
 #include "InputMappingContext.h"
-
-// 移動応答の実測HUD。コンソールで「at.MoveDebug 1」で有効化。
-// VALORANT側の実測(録画のフレーム数え等)と突き合わせるための計測ツール。
-static TAutoConsoleVariable<int32> CVarAimTrainerMoveDebug(
-	TEXT("at.MoveDebug"),
-	0,
-	TEXT("1=AimTrainerの移動計測HUDを表示(0->最高速 / キー解放->停止 / 逆キー->停止 の各ms)"),
-	ECVF_Default);
+#include "MovementTestingComponent.h"
 
 namespace
 {
@@ -67,6 +59,10 @@ AAimTrainerCharacter::AAimTrainerCharacter()
 
 	// 多段ジャンプ禁止
 	JumpMaxCount = 1;
+
+	// fix6: 検証コンポーネント(計測/統計/CSV/レポート)。常駐するが
+	// セッション外はHUD以外何もしないため実行コストは無視できる。
+	TestingComponent = CreateDefaultSubobject<UMovementTestingComponent>(TEXT("MovementTesting"));
 }
 
 void AAimTrainerCharacter::ApplyCharacterSettings()
@@ -77,10 +73,10 @@ void AAimTrainerCharacter::ApplyCharacterSettings()
 	Movement->MaxWalkSpeed = WalkSpeed;
 	Movement->MaxWalkSpeedCrouched = CrouchedSpeed;
 
-	// --- 加速・制動(fix4の中核。根拠はヘッダの各プロパティコメント参照) ---
-	// 加速8192: 0.066秒で最高速(「押した瞬間ほぼ最高速」の証言に整合)
-	// 制動8192: 解放でも0.066秒で停止 → 逆キーとの差は約20msとなり
-	//           「カウンターストレイフの短縮は数ms程度」の証言に整合
+	// --- 加速・制動(fix5: ユーザー提供録画の光学解析による実測値。ヘッダ参照) ---
+	// 加速3000: 実測 20-80%=106ms / 10-90%=149ms からの逆算
+	// 制動7500: 実測 解放停止 20-80%=43ms からの逆算
+	// 摩擦4.5 : 実測 逆キー減速 20-80%=62ms からの逆算
 	Movement->MaxAcceleration = MoveAcceleration;
 	Movement->BrakingDecelerationWalking = MoveBrakingDeceleration;
 	Movement->GroundFriction = MoveGroundFriction;
@@ -183,9 +179,10 @@ void AAimTrainerCharacter::Tick(float DeltaSeconds)
 		const float Duration = FMath::Max(CrouchTransitionTime, 0.01f);
 		const float Alpha = FMath::Clamp(CameraBlendElapsed / Duration, 0.f, 1.f);
 
-		// SmoothStep: 入り/抜きが滑らかなS字。DeltaTimeを直接乗じないため
+		// InterpEaseInOut(指数1.3): 実測したVALORANTの遷移速度カーブ
+		// (ピーク/平均比1.2)に合わせた緩めのS字。DeltaTimeを直接乗じないため
 		// フレームレートに依らず同じ時間・同じ軌跡で完了する。
-		const float Eased = FMath::SmoothStep(0.f, 1.f, Alpha);
+		const float Eased = FMath::InterpEaseInOut(0.f, 1.f, Alpha, CrouchEaseExponent);
 
 		FVector CamLoc = FirstPersonCamera->GetRelativeLocation();
 		CamLoc.Z = FMath::Lerp(CameraBlendStartZ, GetTargetCameraHeight(), Eased);
@@ -197,97 +194,6 @@ void AAimTrainerCharacter::Tick(float DeltaSeconds)
 		}
 	}
 
-	// --- 移動計測HUD(at.MoveDebug 1 のときのみ) ---
-	UpdateMovementDebug();
-}
-
-// ==============================
-// 移動計測HUD(fix4)
-// ==============================
-// VALORANTとの差分を「体感」でなく「ミリ秒」で比較するための計測ツール。
-// 表示値をVALORANT側の実測(高fps録画のフレーム数え等)と突き合わせ、
-// MoveAcceleration / MoveBrakingDeceleration を調整する運用を想定。
-
-void AAimTrainerCharacter::UpdateMovementDebug()
-{
-#if !UE_BUILD_SHIPPING
-	if (CVarAimTrainerMoveDebug.GetValueOnGameThread() == 0 || !GEngine || !GetWorld())
-	{
-		return;
-	}
-
-	const UCharacterMovementComponent* Movement = GetCharacterMovement();
-	const FVector Accel = Movement->GetCurrentAcceleration();
-	FVector Vel = GetVelocity();
-	Vel.Z = 0.f;
-
-	const float Speed = Vel.Size();
-	const float TopSpeed = FMath::Max(Movement->MaxWalkSpeed, 1.f);
-	const float Now = GetWorld()->GetTimeSeconds();
-	const bool bHasInput = !Accel.IsNearlyZero();
-
-	// 現在速度(キー固定=毎フレーム上書き表示)
-	GEngine->AddOnScreenDebugMessage(9001, 0.f, FColor::Cyan,
-		FString::Printf(TEXT("[MoveDebug] Speed %4.0f uu/s (%3.0f%%)"), Speed, Speed / TopSpeed * 100.f));
-
-	// --- 計測1: 入力開始 → 最高速95%到達 ---
-	if (bHasInput && !bDbgPrevHasInput && Speed < 30.f)
-	{
-		DbgAccelStartTime = Now;
-	}
-	if (!bHasInput)
-	{
-		DbgAccelStartTime = -1.f; // 途中でキーを離したら計測破棄
-	}
-	if (DbgAccelStartTime >= 0.f && Speed >= TopSpeed * 0.95f)
-	{
-		GEngine->AddOnScreenDebugMessage(9002, 5.f, FColor::Green,
-			FString::Printf(TEXT("[MoveDebug] 0 -> 95%%最高速 : %4.0f ms"), (Now - DbgAccelStartTime) * 1000.f));
-		DbgAccelStartTime = -1.f;
-	}
-
-	// --- 計測2: キー解放 → 停止 ---
-	if (!bHasInput && bDbgPrevHasInput && Speed > TopSpeed * 0.5f)
-	{
-		DbgBrakeStartTime = Now;
-	}
-	if (bHasInput)
-	{
-		DbgBrakeStartTime = -1.f; // 制動中に再入力したら計測破棄
-	}
-	if (DbgBrakeStartTime >= 0.f && Speed <= 5.f)
-	{
-		GEngine->AddOnScreenDebugMessage(9003, 5.f, FColor::Yellow,
-			FString::Printf(TEXT("[MoveDebug] キー解放 -> 停止 : %4.0f ms"), (Now - DbgBrakeStartTime) * 1000.f));
-		DbgBrakeStartTime = -1.f;
-	}
-
-	// --- 計測3: 逆キー入力 → 速度反転点(カウンターストレイフの停止時間) ---
-	const FVector VelDir = Vel.GetSafeNormal();
-	const FVector AccelDir = Accel.GetSafeNormal();
-	const float MoveDot = FVector::DotProduct(VelDir, AccelDir);
-
-	if (DbgFlipStartTime < 0.f && bHasInput && Speed > TopSpeed * 0.5f && MoveDot < -0.7f)
-	{
-		DbgFlipStartTime = Now; // ほぼ真逆の入力を検出
-	}
-	if (DbgFlipStartTime >= 0.f)
-	{
-		if (!bHasInput)
-		{
-			DbgFlipStartTime = -1.f; // キーを離したら計測破棄(計測2に該当)
-		}
-		else if (Speed <= 20.f || MoveDot > 0.2f)
-		{
-			// 速度がほぼゼロ、または速度が入力方向へ反転した時点=射撃可能になる瞬間
-			GEngine->AddOnScreenDebugMessage(9004, 5.f, FColor::Orange,
-				FString::Printf(TEXT("[MoveDebug] 逆キー -> 停止 : %4.0f ms"), (Now - DbgFlipStartTime) * 1000.f));
-			DbgFlipStartTime = -1.f;
-		}
-	}
-
-	bDbgPrevHasInput = bHasInput;
-#endif
 }
 
 // ==============================
@@ -366,6 +272,16 @@ void AAimTrainerCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInpu
 	if (LookAction)
 	{
 		EIC->BindAction(LookAction, ETriggerEvent::Triggered, this, &AAimTrainerCharacter::Input_Look);
+	}
+
+	// --- 計測用デバッグキー(fix6) ---
+	// 検証専用機能のため、Enhanced Inputアセットを増やさずレガシー直バインドを使う。
+	// F5=計測セッション開始 / F6=終了+レポート / F7=途中レポート
+	if (TestingComponent)
+	{
+		PlayerInputComponent->BindKey(EKeys::F5, IE_Pressed, TestingComponent.Get(), &UMovementTestingComponent::StartSession);
+		PlayerInputComponent->BindKey(EKeys::F6, IE_Pressed, TestingComponent.Get(), &UMovementTestingComponent::EndSession);
+		PlayerInputComponent->BindKey(EKeys::F7, IE_Pressed, TestingComponent.Get(), &UMovementTestingComponent::PrintReport);
 	}
 	else
 	{
