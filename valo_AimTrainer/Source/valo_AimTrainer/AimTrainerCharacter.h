@@ -29,6 +29,7 @@ class UCameraComponent;
 class UMovementTestingComponent;
 class UInputAction;
 class UInputMappingContext;
+class AWeaponBase; // 追加: 武器の基底クラス
 struct FInputActionValue;
 
 UCLASS(config = Game)
@@ -63,6 +64,15 @@ public:
 
 	/** しゃがみ状態に応じた目標カメラ相対高さ */
 	float GetTargetCameraHeight() const;
+
+	// ==============================
+	// 武器システム追加部分 (Phase 2)
+	// ==============================
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon")
+	TSubclassOf<AWeaponBase> DefaultWeaponClass;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Weapon")
+	AWeaponBase* CurrentWeapon;
 
 protected:
 	//~ Begin AActor interface
@@ -101,6 +111,10 @@ protected:
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "AimTrainer|Input")
 	TObjectPtr<UInputAction> CrouchAction;
+
+	// 追加: 射撃入力用のアクション
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "AimTrainer|Input")
+	TObjectPtr<UInputAction> FireAction;
 
 	// ==============================
 	// 移動設定(fix4: 差分分析に基づく再調整)
@@ -231,6 +245,10 @@ protected:
 	void Input_Move(const FInputActionValue& Value);
 	void Input_Look(const FInputActionValue& Value);
 
+	// 追加: 射撃入力コールバック
+	void OnFireStart();
+	void OnFireStop();
+
 private:
 	// --- しゃがみカメラの固定時間ブレンド ---
 
@@ -244,41 +262,4 @@ private:
 	float CameraBlendElapsed = -1.f;
 
 	// 計測HUD・統計・CSV・レポートは UMovementTestingComponent へ移設(fix6)
-};
-
-// 既存のインクルード群の下に前方宣言を追加
-class AWeaponBase;
-class UInputAction; // Enhanced Input用
-
-UCLASS()
-class VALO_AIMTRAINER_API AAimTrainerCharacter : public ACharacter
-{
-	GENERATED_BODY()
-
-	// ... (既存のコンストラクタ等のコード) ...
-
-protected:
-	virtual void BeginPlay() override;
-	virtual void SetupPlayerInputComponent(class UInputComponent* PlayerInputComponent) override;
-
-public:
-	/* --- 武器システム追加部分 --- */
-
-	// Blueprintで指定する武器のクラス（ARifleBase等のBPを指定）
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon")
-	TSubclassOf<AWeaponBase> DefaultWeaponClass;
-
-	// 現在装備している武器の参照
-	UPROPERTY(BlueprintReadOnly, Category = "Weapon")
-	AWeaponBase* CurrentWeapon;
-
-	// 射撃入力用のアクション (Enhanced Input)
-	// エディタ側で InputAction をアサインしてください
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Input")
-	UInputAction* FireAction;
-
-protected:
-	// 射撃入力コールバック
-	void OnFireStart();
-	void OnFireStop();
 };
