@@ -323,3 +323,66 @@ void AAimTrainerCharacter::Input_Look(const FInputActionValue& Value)
 	const float PitchSign = bInvertLookY ? -1.f : 1.f;
 	AddControllerPitchInput(LookValue.Y * PitchSign * MouseSensitivity);
 }
+
+
+#include "AimTrainerCharacter.h"
+#include "WeaponBase.h" // 追加
+#include "EnhancedInputComponent.h" // Enhanced Input用
+#include "EnhancedInputSubsystems.h" // Enhanced Input用
+
+// ... (既存のコンストラクタ等はそのまま) ...
+
+void AAimTrainerCharacter::BeginPlay()
+{
+	Super::BeginPlay();
+
+	/* --- 武器スポーンとアタッチの追加処理 --- */
+	if (DefaultWeaponClass)
+	{
+		// 武器をワールドにスポーン
+		FActorSpawnParameters SpawnParams;
+		SpawnParams.Owner = this;
+		CurrentWeapon = GetWorld()->SpawnActor<AWeaponBase>(DefaultWeaponClass, FVector::ZeroVector, FRotator::ZeroRotator, SpawnParams);
+
+		if (CurrentWeapon)
+		{
+			// キャラクターのメッシュにアタッチする（ソケット名はエディタのスケルトンに合わせて調整してください）
+			// ※FPS視点の場合、一人称用メッシュ(Mesh1P)等があればそちらにアタッチします。
+			CurrentWeapon->AttachToComponent(GetMesh(), FAttachmentTransformRules::SnapToTargetNotIncludingScale, FName("WeaponSocket"));
+		}
+	}
+}
+
+void AAimTrainerCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputComponent)
+{
+	Super::SetupPlayerInputComponent(PlayerInputComponent);
+
+	/* --- 入力バインドの追加 (Enhanced Input) --- */
+	if (UEnhancedInputComponent* EnhancedInputComponent = CastChecked<UEnhancedInputComponent>(PlayerInputComponent))
+	{
+		// 射撃（左クリック）のバインド
+		if (FireAction)
+		{
+			// クリック開始時に StartFire
+			EnhancedInputComponent->BindAction(FireAction, ETriggerEvent::Started, this, &AAimTrainerCharacter::OnFireStart);
+			// クリック終了時に StopFire
+			EnhancedInputComponent->BindAction(FireAction, ETriggerEvent::Completed, this, &AAimTrainerCharacter::OnFireStop);
+		}
+	}
+}
+
+void AAimTrainerCharacter::OnFireStart()
+{
+	if (CurrentWeapon)
+	{
+		CurrentWeapon->StartFire();
+	}
+}
+
+void AAimTrainerCharacter::OnFireStop()
+{
+	if (CurrentWeapon)
+	{
+		CurrentWeapon->StopFire();
+	}
+}

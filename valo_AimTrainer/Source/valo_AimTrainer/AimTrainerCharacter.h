@@ -245,3 +245,40 @@ private:
 
 	// 計測HUD・統計・CSV・レポートは UMovementTestingComponent へ移設(fix6)
 };
+
+// 既存のインクルード群の下に前方宣言を追加
+class AWeaponBase;
+class UInputAction; // Enhanced Input用
+
+UCLASS()
+class VALO_AIMTRAINER_API AAimTrainerCharacter : public ACharacter
+{
+	GENERATED_BODY()
+
+	// ... (既存のコンストラクタ等のコード) ...
+
+protected:
+	virtual void BeginPlay() override;
+	virtual void SetupPlayerInputComponent(class UInputComponent* PlayerInputComponent) override;
+
+public:
+	/* --- 武器システム追加部分 --- */
+
+	// Blueprintで指定する武器のクラス（ARifleBase等のBPを指定）
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon")
+	TSubclassOf<AWeaponBase> DefaultWeaponClass;
+
+	// 現在装備している武器の参照
+	UPROPERTY(BlueprintReadOnly, Category = "Weapon")
+	AWeaponBase* CurrentWeapon;
+
+	// 射撃入力用のアクション (Enhanced Input)
+	// エディタ側で InputAction をアサインしてください
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Input")
+	UInputAction* FireAction;
+
+protected:
+	// 射撃入力コールバック
+	void OnFireStart();
+	void OnFireStop();
+};
