@@ -1,4 +1,5 @@
 ﻿#include "AimTrainerCharacter.h"
+#include "AimTrainerSettingsSubsystem.h"
 #include "Camera/CameraComponent.h"
 #include "Components/CapsuleComponent.h"
 #include "EnhancedInputComponent.h"
@@ -76,8 +77,6 @@ void AAimTrainerCharacter::BeginPlay()
 	Super::BeginPlay();
 	ApplyCharacterSettings();
 
-	UE_LOG(LogTemp, Warning, TEXT("[Character] BeginPlay: 武器のスポーン処理を開始します"));
-
 	if (DefaultWeaponClass)
 	{
 		FActorSpawnParameters SpawnParams;
@@ -86,17 +85,8 @@ void AAimTrainerCharacter::BeginPlay()
 
 		if (CurrentWeapon)
 		{
-			CurrentWeapon->AttachToComponent(GetMesh(), FAttachmentTransformRules::SnapToTargetNotIncludingScale, FName("WeaponSocket"));
-			UE_LOG(LogTemp, Warning, TEXT("[Character] BeginPlay: 武器のスポーンとアタッチに成功しました。クラス名: %s"), *CurrentWeapon->GetName());
+			CurrentWeapon->AttachToComponent(FirstPersonCamera, FAttachmentTransformRules::SnapToTargetNotIncludingScale);
 		}
-		else
-		{
-			UE_LOG(LogTemp, Error, TEXT("[Character] BeginPlay: 武器のスポーンに失敗しました！"));
-		}
-	}
-	else
-	{
-		UE_LOG(LogTemp, Error, TEXT("[Character] BeginPlay: DefaultWeaponClass が設定されていません！"));
 	}
 }
 
@@ -219,23 +209,32 @@ void AAimTrainerCharacter::Input_Move(const FInputActionValue& Value)
 
 void AAimTrainerCharacter::Input_Look(const FInputActionValue& Value)
 {
+	if (!Controller) return;
+
 	const FVector2D LookValue = Value.Get<FVector2D>();
-	AddControllerYawInput(LookValue.X * MouseSensitivity);
+	float EffectiveSensitivity = 1.0f;
+
+	// GameInstanceからSettingsSubsystemを取得し、変換後の感度を得る
+	if (UGameInstance* GameInstance = GetGameInstance())
+	{
+		if (UAimTrainerSettingsSubsystem* Settings = GameInstance->GetSubsystem<UAimTrainerSettingsSubsystem>())
+		{
+			// 将来的なADS状態の判定に備えてメソッドを呼び分ける
+			EffectiveSensitivity = Settings->GetConvertedSensitivity();
+		}
+	}
+
+	AddControllerYawInput(LookValue.X * EffectiveSensitivity);
+
 	const float PitchSign = bInvertLookY ? -1.f : 1.f;
-	AddControllerPitchInput(LookValue.Y * PitchSign * MouseSensitivity);
+	AddControllerPitchInput(LookValue.Y * PitchSign * EffectiveSensitivity);
 }
 
 void AAimTrainerCharacter::OnFireStart()
 {
-	UE_LOG(LogTemp, Warning, TEXT("[Character] 左クリック入力を検知しました。OnFireStart を実行します"));
-	
 	if (CurrentWeapon)
 	{
 		CurrentWeapon->StartFire();
-	}
-	else
-	{
-		UE_LOG(LogTemp, Error, TEXT("[Character] CurrentWeapon が null のため射撃できません！"));
 	}
 }
 
