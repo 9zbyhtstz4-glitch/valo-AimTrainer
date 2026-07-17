@@ -43,4 +43,22 @@ public:
 	// 将来的にCurveVectorなどを追加し、リコイルパターンを制御予定
 	// UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Weapon|Recoil")
 	// class UCurveVector* RecoilPatternCurve; 
+
+	// ==========================================
+	// 今回の追加: 弾薬・リロード設定パラメータ
+	// ==========================================
+
+	/** 
+	 * 1マガジンの最大弾数。
+	 * 理由: 武器スポーン時の初期化、およびリロード完了時に現在弾数をこの値に戻すため。
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Weapon|Ammo", meta = (ClampMin = "1"))
+	int32 MagazineSize = 25;
+
+	/** 
+	 * リロードにかかる秒数。
+	 * 理由: リロード開始から完了(弾が回復し再び射撃可能になる)までの待機タイマーに使用するため。
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Weapon|Ammo", meta = (ClampMin = "0.1"))
+	float ReloadTime = 2.5f;
 };
