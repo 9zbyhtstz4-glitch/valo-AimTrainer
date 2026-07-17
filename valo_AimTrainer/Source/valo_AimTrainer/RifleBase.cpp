@@ -13,7 +13,13 @@ ARifleBase::ARifleBase()
 
 void ARifleBase::StartFire()
 {
-	if (!WeaponData) return;
+	UE_LOG(LogTemp, Warning, TEXT("[RifleBase] StartFire が呼ばれました"));
+
+	if (!WeaponData)
+	{
+		UE_LOG(LogTemp, Error, TEXT("[RifleBase] WeaponData (データアセット) が設定されていません！射撃を中止します"));
+		return;
+	}
 
 	if (WeaponData->bAutomaticFire)
 	{
@@ -33,57 +39,54 @@ void ARifleBase::StopFire()
 
 void ARifleBase::Fire()
 {
+	UE_LOG(LogTemp, Warning, TEXT("[RifleBase] Fire 処理(LineTrace)を開始します"));
+
 	if (!WeaponData) return;
 
-	// 武器の所有者（プレイヤーキャラクター）を取得
 	AAimTrainerCharacter* Character = Cast<AAimTrainerCharacter>(GetOwner());
-	if (!Character) return;
+	if (!Character)
+	{
+		UE_LOG(LogTemp, Error, TEXT("[RifleBase] 所有者(Character)の取得に失敗しました"));
+		return;
+	}
 
-	// カメラの情報を取得（画面中央から飛ばすため）
 	UCameraComponent* Camera = Character->GetFirstPersonCamera();
-	if (!Camera) return;
+	if (!Camera)
+	{
+		UE_LOG(LogTemp, Error, TEXT("[RifleBase] カメラコンポーネントの取得に失敗しました"));
+		return;
+	}
 
-	// ライントレースの始点と終点を計算
 	FVector StartLoc = Camera->GetComponentLocation();
 	FVector ForwardVector = Camera->GetForwardVector();
-	
-	// 射程距離（とりあえず10000uu = 100m先まで）
 	FVector EndLoc = StartLoc + (ForwardVector * 10000.f);
 
-	// トレースの設定（自分自身と所有者を無視する）
 	FHitResult HitResult;
 	FCollisionQueryParams QueryParams;
 	QueryParams.AddIgnoredActor(this);
 	QueryParams.AddIgnoredActor(Character);
 
-	// 射撃（ライントレース）の実行
-	bool bHit = GetWorld()->LineTraceSingleByChannel(
-		HitResult, 
-		StartLoc, 
-		EndLoc, 
-		ECC_Visibility, // ターゲットのCollision設定に合わせて後日調整可能
-		QueryParams
-	);
+	bool bHit = GetWorld()->LineTraceSingleByChannel(HitResult, StartLoc, EndLoc, ECC_Visibility, QueryParams);
 
 	if (bHit)
 	{
-		// 当たったアクターを取得
 		AActor* HitActor = HitResult.GetActor();
+		FString ActorName = HitActor ? HitActor->GetName() : TEXT("Unknown");
+		UE_LOG(LogTemp, Warning, TEXT("[RifleBase] 着弾しました！ ヒット対象: %s"), *ActorName);
 		
-		// インターフェースを実装しているかチェックしてダメージ適用
 		if (HitActor && HitActor->Implements<UDamageable>())
 		{
-			// インターフェース関数の呼び出し
+			UE_LOG(LogTemp, Warning, TEXT("[RifleBase] 対象はUDamageableを持っています。ダメージ処理( %f )を送信します"), WeaponData->Damage);
 			IDamageable::Execute_ReceiveDamage(HitActor, WeaponData->Damage);
 		}
 
-		// デバッグ表示：着弾地点まで赤線、着弾点を緑のボックスで表示（3秒間残る）
-		DrawDebugLine(GetWorld(), StartLoc, HitResult.ImpactPoint, FColor::Red, false, 3.0f, 0, 1.0f);
+		// 判別のための青色デバッグライン（これで赤色が出たら別の処理が動いている証拠です）
+		DrawDebugLine(GetWorld(), StartLoc, HitResult.ImpactPoint, FColor::Blue, false, 3.0f, 0, 1.0f);
 		DrawDebugBox(GetWorld(), HitResult.ImpactPoint, FVector(5.f, 5.f, 5.f), FColor::Green, false, 3.0f, 0, 1.0f);
 	}
 	else
 	{
-		// 何も当たらなかった場合は最大距離まで赤線を表示
-		DrawDebugLine(GetWorld(), StartLoc, EndLoc, FColor::Red, false, 3.0f, 0, 1.0f);
+		UE_LOG(LogTemp, Warning, TEXT("[RifleBase] 何もヒットしませんでした"));
+		DrawDebugLine(GetWorld(), StartLoc, EndLoc, FColor::Blue, false, 3.0f, 0, 1.0f);
 	}
 }
