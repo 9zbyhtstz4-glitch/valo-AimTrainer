@@ -6,6 +6,7 @@
 
 class UCameraComponent;
 class UMovementTestingComponent;
+class UAimTrainerStatsComponent; // 【追加】計測コンポーネントの前方宣言
 class UInputAction;
 class UInputMappingContext;
 class AWeaponBase;
@@ -26,6 +27,10 @@ public:
 	virtual void OnEndCrouch(float HalfHeightAdjust, float ScaledHalfHeightAdjust) override;
 
 	UCameraComponent* GetFirstPersonCamera() const { return FirstPersonCamera; }
+	
+	// 【追加】武器などから計測コンポーネントへアクセスするためのGetter
+	UAimTrainerStatsComponent* GetStatsComponent() const { return StatsComponent; }
+
 	bool IsCameraBlending() const { return CameraBlendElapsed >= 0.f; }
 	float GetTargetCameraHeight() const;
 
@@ -44,6 +49,10 @@ protected:
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "AimTrainer|Testing")
 	TObjectPtr<UMovementTestingComponent> TestingComponent;
+
+	// 【追加】計測用コンポーネントの保持
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "AimTrainer|Stats")
+	TObjectPtr<UAimTrainerStatsComponent> StatsComponent;
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "AimTrainer|Input")
 	TObjectPtr<UInputMappingContext> DefaultMappingContext;

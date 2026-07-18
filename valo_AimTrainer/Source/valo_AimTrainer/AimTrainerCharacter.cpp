@@ -13,6 +13,7 @@
 #include "InputActionValue.h"
 #include "InputMappingContext.h"
 #include "MovementTestingComponent.h"
+#include "AimTrainerStatsComponent.h" // 【追加】
 #include "WeaponBase.h"
 
 namespace
@@ -48,6 +49,9 @@ AAimTrainerCharacter::AAimTrainerCharacter()
 	JumpMaxCount = 1;
 
 	TestingComponent = CreateDefaultSubobject<UMovementTestingComponent>(TEXT("MovementTesting"));
+	
+	// 【追加】計測用コンポーネントの生成
+	StatsComponent = CreateDefaultSubobject<UAimTrainerStatsComponent>(TEXT("StatsComponent"));
 }
 
 void AAimTrainerCharacter::ApplyCharacterSettings()
