@@ -1,6 +1,9 @@
 ﻿// ATargetBot の実装
 #include "TargetBot.h"
 
+#include "Components/SceneComponent.h"
+#include "Components/CapsuleComponent.h"
+#include "Components/SphereComponent.h"
 #include "Components/StaticMeshComponent.h"
 #include "DrawDebugHelpers.h"
 #include "Engine/World.h"
@@ -10,34 +13,60 @@
 
 ATargetBot::ATargetBot()
 {
-	// HP・被弾・リスポーンはすべてイベント駆動のためTick不要(負荷ゼロ)
 	PrimaryActorTick.bCanEverTick = false;
 
-	// --- 球体メッシュ(エンジン標準アセット使用。プロジェクトへのアセット追加なし) ---
-	MeshComponent = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("Mesh"));
-	SetRootComponent(MeshComponent);
-	MeshComponent->SetRelativeScale3D(FVector(0.35f)); // 標準Sphereは直径100uu → 約35uu(頭部サイズ相当)
+	// --- Root ---
+	Root = CreateDefaultSubobject<USceneComponent>(TEXT("Root"));
+	SetRootComponent(Root);
 
-	static ConstructorHelpers::FObjectFinder<UStaticMesh> SphereMesh(
-		TEXT("/Engine/BasicShapes/Sphere.Sphere"));
-	if (SphereMesh.Succeeded())
-	{
-		MeshComponent->SetStaticMesh(SphereMesh.Object);
-	}
-	static ConstructorHelpers::FObjectFinder<UMaterialInterface> BaseMat(
-		TEXT("/Engine/BasicShapes/BasicShapeMaterial.BasicShapeMaterial"));
-	if (BaseMat.Succeeded())
-	{
-		MeshComponent->SetMaterial(0, BaseMat.Object);
-	}
+	// --- マテリアル・メッシュの取得 ---
+	static ConstructorHelpers::FObjectFinder<UStaticMesh> SphereMesh(TEXT("/Engine/BasicShapes/Sphere.Sphere"));
+	static ConstructorHelpers::FObjectFinder<UStaticMesh> CylinderMesh(TEXT("/Engine/BasicShapes/Cylinder.Cylinder"));
+	static ConstructorHelpers::FObjectFinder<UMaterialInterface> BaseMat(TEXT("/Engine/BasicShapes/BasicShapeMaterial.BasicShapeMaterial"));
 
-	// --- 当たり判定 ---
-	// 射撃トレース(ECC_Visibility)にのみ反応させる。
-	// プレイヤーの移動や他のオブジェクトには干渉しない。
-	MeshComponent->SetCollisionEnabled(ECollisionEnabled::QueryOnly);
-	MeshComponent->SetCollisionObjectType(ECC_WorldDynamic);
-	MeshComponent->SetCollisionResponseToAllChannels(ECR_Ignore);
-	MeshComponent->SetCollisionResponseToChannel(ECC_Visibility, ECR_Block);
+	// ==========================================
+	// Body 構成 (カプセル状の体)
+	// ==========================================
+	BodyCollision = CreateDefaultSubobject<UCapsuleComponent>(TEXT("BodyCollision"));
+	BodyCollision->SetupAttachment(Root);
+	BodyCollision->SetCapsuleSize(30.f, 50.f);
+	BodyCollision->SetRelativeLocation(FVector(0.f, 0.f, 50.f)); // 地面から浮かせる
+	BodyCollision->ComponentTags.Add(FName("Body")); // 【重要】部位Tag
+
+	BodyCollision->SetCollisionEnabled(ECollisionEnabled::QueryOnly);
+	BodyCollision->SetCollisionObjectType(ECC_WorldDynamic);
+	BodyCollision->SetCollisionResponseToAllChannels(ECR_Ignore);
+	BodyCollision->SetCollisionResponseToChannel(ECC_Visibility, ECR_Block);
+
+	BodyMesh = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("BodyMesh"));
+	BodyMesh->SetupAttachment(BodyCollision);
+	BodyMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+	if (CylinderMesh.Succeeded()) BodyMesh->SetStaticMesh(CylinderMesh.Object);
+	if (BaseMat.Succeeded()) BodyMesh->SetMaterial(0, BaseMat.Object);
+	// Cylinder(100x100)をカプセル(半径30,高さ100)に合わせるスケール調整
+	BodyMesh->SetRelativeScale3D(FVector(0.6f, 0.6f, 1.0f)); 
+
+	// ==========================================
+	// Head 構成 (球体の頭)
+	// ==========================================
+	HeadCollision = CreateDefaultSubobject<USphereComponent>(TEXT("HeadCollision"));
+	HeadCollision->SetupAttachment(Root);
+	HeadCollision->SetSphereRadius(20.f);
+	HeadCollision->SetRelativeLocation(FVector(0.f, 0.f, 120.f)); // 体の上部に配置
+	HeadCollision->ComponentTags.Add(FName("Head")); // 【重要】部位Tag
+
+	HeadCollision->SetCollisionEnabled(ECollisionEnabled::QueryOnly);
+	HeadCollision->SetCollisionObjectType(ECC_WorldDynamic);
+	HeadCollision->SetCollisionResponseToAllChannels(ECR_Ignore);
+	HeadCollision->SetCollisionResponseToChannel(ECC_Visibility, ECR_Block);
+
+	HeadMesh = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("HeadMesh"));
+	HeadMesh->SetupAttachment(HeadCollision);
+	HeadMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+	if (SphereMesh.Succeeded()) HeadMesh->SetStaticMesh(SphereMesh.Object);
+	if (BaseMat.Succeeded()) HeadMesh->SetMaterial(0, BaseMat.Object);
+	// Sphere(100x100)を半径20に合わせるスケール調整
+	HeadMesh->SetRelativeScale3D(FVector(0.4f, 0.4f, 0.4f));
 }
 
 void ATargetBot::BeginPlay()
@@ -47,12 +76,39 @@ void ATargetBot::BeginPlay()
 	Health = MaxHealth;
 	SpawnLocation = GetActorLocation();
 
-	// 色制御用のマテリアルインスタンスを作成
-	// (パラメータ名 "Color" はエンジン標準 BasicShapeMaterial のもの)
-	Mid = MeshComponent->CreateAndSetMaterialInstanceDynamic(0);
-	if (Mid)
+	// 色制御用のマテリアルインスタンスを部位ごとに作成
+	if (BodyMesh) BodyMid = BodyMesh->CreateAndSetMaterialInstanceDynamic(0);
+	if (HeadMesh) HeadMid = HeadMesh->CreateAndSetMaterialInstanceDynamic(0);
+
+	FLinearColor InitialColor = GetHealthColor();
+	if (BodyMid) BodyMid->SetVectorParameterValue(FName(TEXT("Color")), InitialColor);
+	if (HeadMid) HeadMid->SetVectorParameterValue(FName(TEXT("Color")), InitialColor);
+}
+
+// ==============================
+// 判定・計算ロジック
+// ==============================
+
+ATargetBot::ETargetHitZone ATargetBot::ResolveHitZone(UPrimitiveComponent* HitComponent) const
+{
+	if (!HitComponent) return ETargetHitZone::Unknown;
+
+	if (HitComponent->ComponentHasTag(FName("Head"))) return ETargetHitZone::Head;
+	if (HitComponent->ComponentHasTag(FName("Body"))) return ETargetHitZone::Body;
+
+	return ETargetHitZone::Unknown;
+}
+
+float ATargetBot::CalculateFinalDamage(ETargetHitZone HitZone, const FAimTrainerDamageInfo& DamageInfo) const
+{
+	switch (HitZone)
 	{
-		Mid->SetVectorParameterValue(FName(TEXT("Color")), GetHealthColor());
+		case ETargetHitZone::Head:
+			return DamageInfo.BaseDamage * DamageInfo.HeadshotMultiplier;
+		case ETargetHitZone::Body:
+			return DamageInfo.BaseDamage;
+		default:
+			return 0.0f;
 	}
 }
 
@@ -60,50 +116,62 @@ void ATargetBot::BeginPlay()
 // 被弾(IDamageable)
 // ==============================
 
-void ATargetBot::ReceiveDamage_Implementation(float DamageAmount)
+void ATargetBot::ReceiveDamage_Implementation(const FAimTrainerDamageInfo& DamageInfo)
 {
-	// 撃破済み(非表示リスポーン待ち)の間は無効。
-	// ※コリジョンも無効化しているため通常は到達しないが、二重の保険とする。
-	if (bDead)
+	if (bDead) return;
+
+	UPrimitiveComponent* HitComp = DamageInfo.HitComponent.Get();
+	ETargetHitZone HitZone = ResolveHitZone(HitComp);
+
+	// 未知の部位(銃など)に当たった場合はログを出して即終了
+	if (HitZone == ETargetHitZone::Unknown)
 	{
+		FString ActorName = GetName();
+		FString CompName = HitComp ? HitComp->GetName() : TEXT("NullComponent");
+		FString TagsStr = TEXT("None");
+		if (HitComp && HitComp->ComponentTags.Num() > 0)
+		{
+			TagsStr = TEXT("");
+			for (const FName& Tag : HitComp->ComponentTags)
+			{
+				TagsStr += Tag.ToString() + TEXT(", ");
+			}
+		}
+		UE_LOG(LogTemp, Warning, TEXT("[TargetBot] Unknown Hit! Actor: %s, Component: %s, Tags: %s"), *ActorName, *CompName, *TagsStr);
 		return;
 	}
 
-	Health -= DamageAmount;
+	// ダメージ計算
+	float FinalDamage = CalculateFinalDamage(HitZone, DamageInfo);
+	Health -= FinalDamage;
 
-	UE_LOG(LogTemp, Log, TEXT("[TargetBot] Hit Damage=%.0f HP=%.0f/%.0f (%s)"),
-		DamageAmount, FMath::Max(Health, 0.f), MaxHealth, *GetName());
+	UE_LOG(LogTemp, Log, TEXT("[TargetBot] Hit Damage=%.0f (Headshot:%d) HP=%.0f/%.0f (%s)"),
+		FinalDamage, (HitZone == ETargetHitZone::Head), FMath::Max(Health, 0.f), MaxHealth, *GetName());
 
+	// 死亡判定
 	if (Health <= 0.f)
 	{
 		Die();
 		return;
 	}
 
-	// --- 被弾フィードバック: 白フラッシュ → HP比率色へ戻す ---
-	if (Mid)
-	{
-		Mid->SetVectorParameterValue(FName(TEXT("Color")), FLinearColor::White);
-		GetWorldTimerManager().SetTimer(FlashTimerHandle, this,
-			&ATargetBot::RestoreColor, HitFlashTime, /*bLoop=*/false);
-	}
+	// --- 被弾フィードバック: 白フラッシュ ---
+	if (BodyMid) BodyMid->SetVectorParameterValue(FName(TEXT("Color")), FLinearColor::White);
+	if (HeadMid) HeadMid->SetVectorParameterValue(FName(TEXT("Color")), FLinearColor::White);
+
+	GetWorldTimerManager().SetTimer(FlashTimerHandle, this, &ATargetBot::RestoreColor, HitFlashTime, false);
 }
 
 void ATargetBot::RestoreColor()
 {
-	if (Mid)
-	{
-		Mid->SetVectorParameterValue(FName(TEXT("Color")), GetHealthColor());
-	}
+	FLinearColor CurrentColor = GetHealthColor();
+	if (BodyMid) BodyMid->SetVectorParameterValue(FName(TEXT("Color")), CurrentColor);
+	if (HeadMid) HeadMid->SetVectorParameterValue(FName(TEXT("Color")), CurrentColor);
 }
 
 FLinearColor ATargetBot::GetHealthColor() const
 {
-	if (!bShowHealthByColor)
-	{
-		return BaseColor;
-	}
-	// HP満タン=BaseColor(シアン) → 残りわずか=赤 へ線形変化
+	if (!bShowHealthByColor) return BaseColor;
 	const float Ratio = FMath::Clamp(Health / FMath::Max(MaxHealth, 1.f), 0.f, 1.f);
 	return FMath::Lerp(FLinearColor::Red, BaseColor, Ratio);
 }
@@ -116,33 +184,26 @@ void ATargetBot::Die()
 {
 	bDead = true;
 
-	UE_LOG(LogTemp, Log, TEXT("[TargetBot] Killed (respawn in %.1fs) (%s)"),
-		RespawnDelay, *GetName());
+	UE_LOG(LogTemp, Log, TEXT("[TargetBot] Killed (respawn in %.1fs) (%s)"), RespawnDelay, *GetName());
 
-	// 撃破エフェクト(アセット不要の簡易表現: シアンの球ワイヤが一瞬広がる)
 #if ENABLE_DRAW_DEBUG
-	DrawDebugSphere(GetWorld(), GetActorLocation(), 30.f, 10, FColor::Cyan,
-		false, 0.3f, 0, 1.5f);
+	DrawDebugSphere(GetWorld(), GetActorLocation(), 30.f, 10, FColor::Cyan, false, 0.3f, 0, 1.5f);
 #endif
 
-	// 将来のスコア/命中率/TTK計測用フック(現状は購読者なし)
 	OnBotKilled.Broadcast(this);
 
-	// Destroyせず非表示+コリジョン無効(リスポーンで使い回す)
+	// Destroyせず非表示+コリジョン無効(Actor全体で制御)
 	SetActorHiddenInGame(true);
 	SetActorEnableCollision(false);
 
-	GetWorldTimerManager().SetTimer(RespawnTimerHandle, this,
-		&ATargetBot::Respawn, RespawnDelay, /*bLoop=*/false);
+	GetWorldTimerManager().SetTimer(RespawnTimerHandle, this, &ATargetBot::Respawn, RespawnDelay, false);
 }
 
 void ATargetBot::Respawn()
 {
-	// --- 状態リセット ---
 	Health = MaxHealth;
 	bDead = false;
 
-	// --- 位置決定: 同位置 or 初期位置を中心としたローカル軸ランダム範囲 ---
 	FVector NewLocation = SpawnLocation;
 	if (bRandomRespawnOffset)
 	{
@@ -151,13 +212,12 @@ void ATargetBot::Respawn()
 			GetActorRightVector()   * FMath::FRandRange(-RespawnAreaExtent.Y, RespawnAreaExtent.Y) +
 			FVector::UpVector       * FMath::FRandRange(-RespawnAreaExtent.Z, RespawnAreaExtent.Z);
 	}
-	SetActorLocation(NewLocation, /*bSweep=*/false, nullptr, ETeleportType::TeleportPhysics);
+	SetActorLocation(NewLocation, false, nullptr, ETeleportType::TeleportPhysics);
 
-	// --- 見た目リセットと再有効化 ---
-	if (Mid)
-	{
-		Mid->SetVectorParameterValue(FName(TEXT("Color")), GetHealthColor());
-	}
+	FLinearColor CurrentColor = GetHealthColor();
+	if (BodyMid) BodyMid->SetVectorParameterValue(FName(TEXT("Color")), CurrentColor);
+	if (HeadMid) HeadMid->SetVectorParameterValue(FName(TEXT("Color")), CurrentColor);
+
 	SetActorHiddenInGame(false);
 	SetActorEnableCollision(true);
 

@@ -12,10 +12,14 @@
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
 #include "DamageableInterface.h"
+#include "AimTrainerDamageTypes.h" // 【追加】ダメージ情報パケット用
 #include "TargetBot.generated.h"
 
 class UMaterialInstanceDynamic;
 class UStaticMeshComponent;
+class USceneComponent;       // 【追加】
+class UCapsuleComponent;     // 【追加】
+class USphereComponent;      // 【追加】
 
 class ATargetBot;
 
@@ -32,7 +36,8 @@ public:
 
 	//~ Begin IDamageable interface
 	/** 被弾処理(RifleBaseの Execute_ReceiveDamage から呼ばれる) */
-	virtual void ReceiveDamage_Implementation(float DamageAmount) override;
+	// 【変更】floatから FAimTrainerDamageInfo の参照へ変更
+	virtual void ReceiveDamage_Implementation(const FAimTrainerDamageInfo& DamageInfo) override;
 	//~ End IDamageable interface
 
 	/** 撃破通知デリゲート(ネイティブ用) */
@@ -50,16 +55,23 @@ protected:
 	virtual void BeginPlay() override;
 
 	// ==============================
-	// コンポーネント
+	// コンポーネント (Head/Body分離)
 	// ==============================
 
-	/**
-	 * 見た目+当たり判定の球体メッシュ(既定=エンジン標準Sphere・直径約35uu)。
-	 * コリジョンは Visibility のみ Block(射撃トレースだけに反応し移動を妨げない)。
-	 * BP側で別メッシュへ差し替え可能。
-	 */
-	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "TargetBot")
-	TObjectPtr<UStaticMeshComponent> MeshComponent;
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "TargetBot|Components")
+	TObjectPtr<USceneComponent> Root;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "TargetBot|Components")
+	TObjectPtr<UCapsuleComponent> BodyCollision;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "TargetBot|Components")
+	TObjectPtr<UStaticMeshComponent> BodyMesh;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "TargetBot|Components")
+	TObjectPtr<USphereComponent> HeadCollision;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "TargetBot|Components")
+	TObjectPtr<UStaticMeshComponent> HeadMesh;
 
 	// ==============================
 	// 調整パラメータ(すべてBPで変更可能)
@@ -96,6 +108,29 @@ protected:
 
 private:
 	// ==============================
+	// 部位判定および計算用内部定義
+	// ==============================
+
+	enum class ETargetHitZone : uint8
+	{
+		Unknown,
+		Body,
+		Head
+	};
+
+	/** 
+	 * HitComponentのTagを解析し、HitZone Enumを返す純粋な関数 
+	 * 副作用・ログ出力は持たない
+	 */
+	ETargetHitZone ResolveHitZone(UPrimitiveComponent* HitComponent) const;
+
+	/** 
+	 * HitZoneとDamageInfoから最終ダメージを算出する純粋な計算関数 
+	 * 副作用・ログ出力は持たない
+	 */
+	float CalculateFinalDamage(ETargetHitZone HitZone, const FAimTrainerDamageInfo& DamageInfo) const;
+
+	// ==============================
 	// 内部処理(細分化)
 	// ==============================
 
@@ -111,9 +146,12 @@ private:
 	/** 現在HPに対応する表示色を返す(bShowHealthByColor=falseなら常にBaseColor) */
 	FLinearColor GetHealthColor() const;
 
-	/** 色制御用のマテリアルインスタンス */
+	// 【変更】単一のMidを、明示的な2変数管理(BodyMid, HeadMid)へ変更
 	UPROPERTY()
-	TObjectPtr<UMaterialInstanceDynamic> Mid;
+	TObjectPtr<UMaterialInstanceDynamic> BodyMid;
+
+	UPROPERTY()
+	TObjectPtr<UMaterialInstanceDynamic> HeadMid;
 
 	/** 現在HP */
 	float Health = 100.f;

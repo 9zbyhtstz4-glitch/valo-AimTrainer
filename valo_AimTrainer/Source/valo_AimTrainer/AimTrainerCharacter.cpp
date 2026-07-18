@@ -193,6 +193,11 @@ void AAimTrainerCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInpu
 		PlayerInputComponent->BindKey(EKeys::F6, IE_Pressed, TestingComponent.Get(), &UMovementTestingComponent::EndSession);
 		PlayerInputComponent->BindKey(EKeys::F7, IE_Pressed, TestingComponent.Get(), &UMovementTestingComponent::PrintReport);
 	}
+
+	if (ReloadAction)
+	{
+		EIC->BindAction(ReloadAction, ETriggerEvent::Started, this, &AAimTrainerCharacter::OnReload);
+	}
 }
 
 void AAimTrainerCharacter::Input_Move(const FInputActionValue& Value)
@@ -243,5 +248,13 @@ void AAimTrainerCharacter::OnFireStop()
 	if (CurrentWeapon)
 	{
 		CurrentWeapon->StopFire();
+	}
+}
+
+void AAimTrainerCharacter::OnReload()
+{
+	if (CurrentWeapon)
+	{
+		CurrentWeapon->Reload();
 	}
 }

@@ -2,20 +2,30 @@
 
 #include "CoreMinimal.h"
 #include "UObject/Interface.h"
+#include "AimTrainerDamageTypes.h"
 #include "DamageableInterface.generated.h"
 
-UINTERFACE(MinimalAPI, Blueprintable)
+// This class does not need to be modified.
+UINTERFACE(MinimalAPI)
 class UDamageable : public UInterface
 {
 	GENERATED_BODY()
 };
 
+/**
+ * ダメージを受け取るアクターが実装する共通インターフェース
+ */
 class VALO_AIMTRAINER_API IDamageable
 {
 	GENERATED_BODY()
 
+	// Add interface functions to this class. This is the class that will be inherited to implement this interface.
 public:
-	// BlueprintとC++の両方で実装可能なダメージ処理関数
-	UFUNCTION(BlueprintCallable, BlueprintNativeEvent, Category = "Damage")
-	void ReceiveDamage(float DamageAmount);
+
+	/**
+	 * ダメージ情報を受信する
+	 * @param DamageInfo Weaponから送信されるダメージ情報パケット
+	 */
+	UFUNCTION(BlueprintNativeEvent, Category = "Damage")
+	void ReceiveDamage(const FAimTrainerDamageInfo& DamageInfo);
 };

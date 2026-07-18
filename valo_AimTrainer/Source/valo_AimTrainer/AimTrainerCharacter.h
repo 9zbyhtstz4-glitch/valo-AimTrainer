@@ -63,6 +63,9 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "AimTrainer|Input")
 	TObjectPtr<UInputAction> FireAction;
 
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "AimTrainer|Input")
+	TObjectPtr<UInputAction> ReloadAction;
+
 	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "AimTrainer|Move", meta = (ClampMin = "1.0"))
 	float WalkSpeed = 540.f;
 
@@ -115,6 +118,7 @@ protected:
 	void Input_Look(const FInputActionValue& Value);
 	void OnFireStart();
 	void OnFireStop();
+	void OnReload();
 
 private:
 	void StartCameraHeightBlend();
